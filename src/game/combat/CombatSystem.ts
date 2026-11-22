@@ -1,0 +1,614 @@
+/**
+ * The Seven Hellgates - Soulslike Combat System
+ * Stamina management, i-frame dodging, hitbox detection, combo chaining, and hitstop.
+ */
+
+import * as THREE from 'three';
+import { CombatStance, FloatingText, PassiveSealBuffSummary, PlayerStats, WeaponId, WeaponUpgradeLevels } from '../types';
+import { AzraelModel } from '../entities/AzraelModel';
+import { EnemyInstance } from '../entities/EnemyModels';
+import { BossInstance } from '../entities/BossModels';
+import { ParticleSystem } from '../vfx/ParticleSystem';
+import { soundEngine } from '../audio/SoundEngine';
+import { getWeaponEffectiveStats, WEAPON_BY_ID } from '../arsenal/WeaponRegistry';
+
+export class CombatSystem {
+  public health: number;
+  public maxHealth: number;
+  public stamina: number;
+  public maxStamina: number;
+  public wrath: number;
+  public maxWrath: number = 100;
+
+  // Health Regeneration System
+  public timeSinceLastDamage: number = 999;
+  public healIndicatorTimer: number = 0;
+  public isPassivelyRegenerating: boolean = false;
+  private awardedDefeatHealthEnemyIds = new Set<string>();
+
+  // Combo Counter & Wrath Multiplier
+  public comboCount: number = 0;
+  public comboMultiplierTimer: number = 0;
+
+  public getComboTier(count: number = this.comboCount): number {
+    if (count >= 20) return 4;
+    if (count >= 12) return 3;
+    if (count >= 6) return 2;
+    if (count >= 2) return 1;
+    return 0;
+  }
+
+  public getComboMultiplier(): number {
+    return 1.0 + Math.min(1.5, Math.floor(this.comboCount / 4) * 0.25);
+  }
+
+  public registerHitLanded() {
+    const prevTier = this.getComboTier();
+    this.comboCount++;
+    this.comboMultiplierTimer = 3.2; // 3.2s combo decay window
+    const newTier = this.getComboTier();
+    if (newTier > prevTier && newTier >= 1) {
+      soundEngine.playComboRankUp(newTier);
+    }
+  }
+
+  // Sovereign Reward: Gluttonous Monstrance
+  public hasGluttonousMonstrance: boolean = false;
+  public devourCooldownTimer: number = 0;
+
+  private staminaRegenDelay: number = 0;
+  private comboStep: number = 1;
+  private comboTimer: number = 0;
+  public iFramesActive: boolean = false;
+  private iFramesTimer: number = 0;
+  private hitstopTimer: number = 0;
+  private wrathTimerId: ReturnType<typeof setTimeout> | null = null;
+  private wrathGeneration: number = 0;
+  private disposed: boolean = false;
+
+  // Passive Limbo Seal Buffs
+  public sealBuffs: PassiveSealBuffSummary = {
+    maxHealthBonus: 0,
+    maxStaminaBonus: 0,
+    staminaRegenMult: 1.0,
+    damageMult: 1.0,
+    wrathGainMult: 1.0,
+    emberYieldMult: 1.0,
+    healPotencyMult: 1.0,
+    activeBuffNames: [],
+  };
+
+  public floatingTexts: FloatingText[] = [];
+
+  constructor(stats: PlayerStats, sealBuffs?: PassiveSealBuffSummary) {
+    if (sealBuffs) this.sealBuffs = sealBuffs;
+    this.maxHealth = 100 + stats.vitality * 15 + this.sealBuffs.maxHealthBonus;
+    this.health = this.maxHealth;
+    this.maxStamina = 80 + stats.vigor * 10 + this.sealBuffs.maxStaminaBonus;
+    this.stamina = this.maxStamina;
+    this.wrath = 20;
+  }
+
+  public applySealBuffs(stats: PlayerStats, sealBuffs: PassiveSealBuffSummary, healDelta: boolean = true) {
+    const prevMaxHealth = this.maxHealth;
+    const prevMaxStam = this.maxStamina;
+    this.sealBuffs = sealBuffs;
+    this.maxHealth = 100 + stats.vitality * 15 + sealBuffs.maxHealthBonus;
+    this.maxStamina = 80 + stats.vigor * 10 + sealBuffs.maxStaminaBonus;
+    if (healDelta && this.maxHealth > prevMaxHealth) {
+      this.health = Math.min(this.maxHealth, this.health + (this.maxHealth - prevMaxHealth));
+    } else {
+      this.health = Math.min(this.maxHealth, this.health);
+    }
+    if (this.maxStamina > prevMaxStam) {
+      this.stamina = Math.min(this.maxStamina, this.stamina + (this.maxStamina - prevMaxStam));
+    }
+  }
+
+  public clearWrathTimer(): void {
+    if (this.wrathTimerId !== null) {
+      clearTimeout(this.wrathTimerId);
+      this.wrathTimerId = null;
+    }
+    this.wrathGeneration++;
+  }
+
+  public resetForNewGame(stats: PlayerStats, sealBuffs: PassiveSealBuffSummary) {
+    this.clearWrathTimer();
+    this.sealBuffs = sealBuffs;
+    this.hasGluttonousMonstrance = false;
+    this.devourCooldownTimer = 0;
+    this.comboCount = 0;
+    this.comboMultiplierTimer = 0;
+    this.comboStep = 1;
+    this.comboTimer = 0;
+    this.wrath = 20;
+    this.timeSinceLastDamage = 999;
+    this.healIndicatorTimer = 0;
+    this.isPassivelyRegenerating = false;
+    this.iFramesActive = false;
+    this.iFramesTimer = 0;
+    this.hitstopTimer = 0;
+    this.floatingTexts = [];
+    this.awardedDefeatHealthEnemyIds.clear();
+    this.maxHealth = 100 + stats.vitality * 15 + sealBuffs.maxHealthBonus;
+    this.health = this.maxHealth;
+    this.maxStamina = 80 + stats.vigor * 10 + sealBuffs.maxStaminaBonus;
+    this.stamina = this.maxStamina;
+  }
+
+  public recalculateStats(stats: PlayerStats, healOnVitalityUpgrade: boolean = false) {
+    const prevMaxHealth = this.maxHealth;
+    this.maxHealth = 100 + stats.vitality * 15 + this.sealBuffs.maxHealthBonus;
+    if (healOnVitalityUpgrade) {
+      // Upgrading Vitality increases max health AND immediately heals Azrael
+      const hpDelta = Math.max(0, this.maxHealth - prevMaxHealth);
+      this.health = Math.min(this.maxHealth, Math.max(this.health + hpDelta, this.maxHealth));
+      this.healIndicatorTimer = 1.6;
+    } else {
+      const healthPercent = prevMaxHealth > 0 ? this.health / prevMaxHealth : 1;
+      this.health = this.maxHealth * healthPercent;
+    }
+
+    const stamPercent = this.maxStamina > 0 ? this.stamina / this.maxStamina : 1;
+    this.maxStamina = 80 + stats.vigor * 10 + this.sealBuffs.maxStaminaBonus;
+    this.stamina = this.maxStamina * stamPercent;
+  }
+
+  /**
+   * Restores health up to maximum. Cannot revive dead Azrael.
+   */
+  public restoreHealth(amount: number): number {
+    if (this.health <= 0 || amount <= 0) return 0;
+    const scaledAmount = amount * this.sealBuffs.healPotencyMult;
+    const healed = Math.min(scaledAmount, this.maxHealth - this.health);
+    if (healed > 0) {
+      this.health = Math.min(this.maxHealth, this.health + healed);
+      this.healIndicatorTimer = 0.8;
+    }
+    return healed;
+  }
+
+  public resetDamageTimer() {
+    this.timeSinceLastDamage = 0;
+    this.isPassivelyRegenerating = false;
+  }
+
+  public awardEnemyDefeatHealth(enemy: EnemyInstance) {
+    const id = enemy.id || `${enemy.stats.name}_${enemy.group.position.x.toFixed(1)}_${enemy.group.position.z.toFixed(1)}`;
+    if (this.awardedDefeatHealthEnemyIds.has(id)) return;
+    this.awardedDefeatHealthEnemyIds.add(id);
+
+    const isElite = enemy.stats.name.toLowerCase().includes('elite') ||
+      enemy.stats.type === 'hellbrute' ||
+      enemy.stats.type === 'butcher';
+    const healAmount = isElite ? 15 : 8;
+    this.restoreHealth(healAmount);
+  }
+
+  public awardBossDefeatHealth(bossKey: string) {
+    if (this.awardedDefeatHealthEnemyIds.has(bossKey)) return;
+    this.awardedDefeatHealthEnemyIds.add(bossKey);
+    this.restoreHealth(25);
+  }
+
+  public update(delta: number, isEngagedWithEnemies: boolean = false): boolean {
+    // Return true if hitstop is currently pausing frames
+    if (this.hitstopTimer > 0) {
+      this.hitstopTimer -= delta;
+      return true;
+    }
+
+    this.timeSinceLastDamage += delta;
+    if (this.healIndicatorTimer > 0) {
+      this.healIndicatorTimer -= delta;
+    }
+    if (this.devourCooldownTimer > 0) {
+      this.devourCooldownTimer = Math.max(0, this.devourCooldownTimer - delta);
+    }
+
+    // 0. Passive Health Regeneration:
+    // After 10s without damage, regen 4 HP/sec, only when no enemies actively engaging
+    if (!isEngagedWithEnemies && this.timeSinceLastDamage >= 10.0 && this.health > 0 && this.health < this.maxHealth) {
+      this.isPassivelyRegenerating = true;
+      this.restoreHealth(4 * delta);
+    } else {
+      this.isPassivelyRegenerating = false;
+    }
+
+    // 1. Combo Window Decay
+    if (this.comboMultiplierTimer > 0) {
+      this.comboMultiplierTimer -= delta;
+      if (this.comboMultiplierTimer <= 0) {
+        this.comboCount = 0;
+      }
+    }
+
+    // 2. Stamina Regeneration
+    if (this.staminaRegenDelay > 0) {
+      this.staminaRegenDelay -= delta;
+    } else if (this.stamina < this.maxStamina) {
+      this.stamina = Math.min(this.maxStamina, this.stamina + 35 * this.sealBuffs.staminaRegenMult * delta);
+    }
+
+    // 3. I-Frames timer
+    if (this.iFramesActive) {
+      this.iFramesTimer -= delta;
+      if (this.iFramesTimer <= 0) {
+        this.iFramesActive = false;
+      }
+    }
+
+    // 4. Combo step window decay
+    if (this.comboTimer > 0) {
+      this.comboTimer -= delta;
+      if (this.comboTimer <= 0) {
+        this.comboStep = 1;
+      }
+    }
+
+    // 5. Update floating combat text
+    for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
+      const ft = this.floatingTexts[i];
+      ft.opacity -= delta * 1.5;
+      ft.y -= delta * 30;
+      if (ft.opacity <= 0) {
+        this.floatingTexts.splice(i, 1);
+      }
+    }
+
+    return false;
+  }
+
+  public tryDodge(azrael: AzraelModel): boolean {
+    if (this.stamina < 20 || azrael.isDodging || azrael.isDead) return false;
+    this.stamina -= 20;
+    this.staminaRegenDelay = 0.55;
+    this.iFramesActive = true;
+    this.iFramesTimer = 0.35; // 350ms of invulnerability
+    azrael.isDodging = true;
+    azrael.dodgeProgress = 0;
+    soundEngine.playDodgeRoll();
+    return true;
+  }
+
+  public executeAttack(
+    isHeavy: boolean,
+    azrael: AzraelModel,
+    enemies: EnemyInstance[],
+    boss: BossInstance | null,
+    particles: ParticleSystem,
+    stats: PlayerStats,
+    equippedWeaponId: WeaponId = 'kings_remnant',
+    weaponUpgrades?: Partial<WeaponUpgradeLevels>
+  ): { embersGained: number; hitLanded: boolean; defeatedEnemies: EnemyInstance[]; bossDefeated: boolean; bossStaggered?: boolean } {
+    if (azrael.isAttacking || azrael.isDodging || azrael.isDead) return { embersGained: 0, hitLanded: false, defeatedEnemies: [], bossDefeated: false, bossStaggered: false };
+
+    const weaponDef = WEAPON_BY_ID[equippedWeaponId] || WEAPON_BY_ID.kings_remnant;
+    const effStats = getWeaponEffectiveStats(weaponDef.id, weaponUpgrades);
+
+    const staminaCost = isHeavy ? effStats.staminaCostHeavy : effStats.staminaCostLight;
+    if (this.stamina < staminaCost) {
+      // Out of stamina penalty
+      soundEngine.playSwordSwing(0.6);
+      return { embersGained: 0, hitLanded: false, defeatedEnemies: [], bossDefeated: false, bossStaggered: false };
+    }
+
+    this.stamina -= staminaCost;
+    this.staminaRegenDelay = 0.7;
+
+    const currentStep = isHeavy ? 1 : this.comboStep;
+    azrael.triggerAttack(currentStep, isHeavy, effStats.speedMultiplier);
+
+    // Audio SFX
+    if (azrael.currentStance === 'executioner') {
+      soundEngine.playGauntletPunch();
+    } else if (isHeavy) {
+      soundEngine.playHeavySlash();
+    } else {
+      soundEngine.playSwordSwing((1.0 + (currentStep - 1) * 0.15) * effStats.speedMultiplier);
+    }
+
+    // Visual slash arc using equipped weapon color (or blue-white during Wrath Unbound)
+    const slashColor = azrael.currentStance === 'wrath_unbound'
+      ? 0x93c5fd
+      : (azrael.currentStance === 'executioner' ? 0xf59e0b : weaponDef.primaryColorHex);
+    particles.spawnSlashArc(azrael.group.position, azrael.group.rotation, slashColor, isHeavy);
+
+    // Base damage calculation scaling cleanly from equipped weapon stats + upgrades + strength + Seal Buffs
+    const weaponRatio = effStats.damage / 42;
+    let baseDamage = (((isHeavy ? 65 : (28 + currentStep * 8)) * weaponRatio) + stats.strength * 3.5) * this.sealBuffs.damageMult;
+    if (azrael.currentStance === 'wrath_unbound') {
+      baseDamage *= 1.65;
+    } else if (azrael.currentStance === 'executioner') {
+      baseDamage *= 1.25;
+    }
+
+    let hitLanded = false;
+    let embersGained = 0;
+    const defeatedEnemies: EnemyInstance[] = [];
+    let bossDefeated = false;
+    const playerPos = azrael.group.position;
+    const playerForward = new THREE.Vector3(0, 0, 1).applyEuler(azrael.group.rotation);
+    const attackRange = (isHeavy ? effStats.range + 0.5 : effStats.range) * (azrael.currentStance === 'executioner' ? 0.8 : 1.0);
+
+    // 1. Check hits against standard enemies
+    for (const enemy of enemies) {
+      if (enemy.isDead) continue;
+      const toEnemy = new THREE.Vector3().subVectors(enemy.group.position, playerPos);
+      toEnemy.y = 0;
+      const dist = toEnemy.length();
+
+      if (dist <= attackRange) {
+        toEnemy.normalize();
+        const angle = playerForward.dot(toEnemy);
+        // 120 degree frontal arc
+        if (angle > 0.3 || dist <= 1.2) {
+          hitLanded = true;
+          const damage = Math.round(baseDamage * (0.9 + Math.random() * 0.2));
+          enemy.takeDamage(damage);
+
+          // Build combo counter & wrath with combo multiplier
+          this.registerHitLanded();
+          const wrathMult = this.getComboMultiplier() * this.sealBuffs.wrathGainMult;
+          this.wrath = Math.min(this.maxWrath, this.wrath + (isHeavy ? 12 : 6) * wrathMult);
+
+          // Effects
+          particles.spawnSparks(enemy.group.position, 16, slashColor);
+          particles.spawnBlood(enemy.group.position, 12);
+          soundEngine.playHitImpact(isHeavy);
+          this.triggerHitstop(0.045);
+
+          // Heavy knockback
+          if (isHeavy) {
+            enemy.group.position.addScaledVector(playerForward, 1.2);
+            particles.spawnGroundShockwave(enemy.group.position, 2.8, slashColor);
+          }
+
+          if (enemy.isDead) {
+            embersGained += enemy.stats.emberReward;
+            soundEngine.playEnemyDeath();
+            this.awardEnemyDefeatHealth(enemy);
+            defeatedEnemies.push(enemy);
+          }
+        }
+      }
+    }
+
+    let bossStaggered = false;
+
+    // 2. Check hit against Boss
+    if (boss && !boss.isDead) {
+      const toBoss = new THREE.Vector3().subVectors(boss.group.position, playerPos);
+      toBoss.y = 0;
+      const dist = toBoss.length();
+      if (dist <= attackRange + 1.2) {
+        hitLanded = true;
+        let damage = Math.round(baseDamage * (0.85 + Math.random() * 0.3));
+
+        // CRITICAL VULNERABILITY: If boss is currently staggered, attacks deal +45% bonus critical damage!
+        const isCritical = boss.isStaggered;
+        if (isCritical) {
+          damage = Math.round(damage * 1.45);
+        }
+
+        if (!boss.isStaggered && effStats.staggerPower > 1.0) {
+          const extraPoiseDmg = Math.round((isHeavy ? 20 : 8) * (effStats.staggerPower - 1.0));
+          boss.poise = Math.max(0, boss.poise - extraPoiseDmg);
+        }
+
+        const triggeredStagger = boss.takeDamage(damage, isHeavy);
+        if (triggeredStagger) {
+          bossStaggered = true;
+          soundEngine.playStaggerBreak();
+          particles.spawnStaggerBurst(boss.group.position, 0xfbbf24);
+          this.triggerHitstop(0.12); // Extra weighty hitstop on posture break
+        } else if (isCritical) {
+          // Additional critical spark burst on staggered boss
+          particles.spawnStaggerBurst(boss.group.position, 0xf59e0b);
+          soundEngine.playHitImpact(true);
+          this.triggerHitstop(0.08);
+        } else {
+          particles.spawnSparks(boss.group.position, 25, slashColor);
+          soundEngine.playHitImpact(isHeavy);
+          this.triggerHitstop(0.05);
+        }
+
+        this.registerHitLanded();
+        const wrathMult = this.getComboMultiplier() * this.sealBuffs.wrathGainMult;
+        this.wrath = Math.min(this.maxWrath, this.wrath + (isHeavy ? 15 : 8) * wrathMult);
+
+        if (isHeavy) {
+          particles.spawnGroundShockwave(boss.group.position, 4.0, slashColor);
+        }
+
+        if (boss.isDead) {
+          embersGained += 500 + boss.realmId * 250;
+          this.awardBossDefeatHealth(boss.name);
+          bossDefeated = true;
+        }
+      }
+    }
+
+    // Combo step progression
+    if (!isHeavy) {
+      this.comboStep = this.comboStep >= 3 ? 1 : this.comboStep + 1;
+      this.comboTimer = 1.1; // 1.1s window to continue combo
+    }
+
+    return { embersGained, hitLanded, defeatedEnemies, bossDefeated, bossStaggered };
+  }
+
+  public takePlayerDamage(amount: number, particles: ParticleSystem, azraelPos: THREE.Vector3): boolean {
+    if (this.iFramesActive || this.health <= 0) {
+      return false; // Dodged or already dead
+    }
+
+    this.resetDamageTimer();
+    this.comboCount = 0;
+    this.comboMultiplierTimer = 0;
+    this.health = Math.max(0, this.health - amount);
+    particles.spawnBlood(azraelPos, 20);
+    soundEngine.playHitImpact(true);
+    this.triggerHitstop(0.06);
+
+    if (this.health <= 0) {
+      this.clearWrathTimer();
+    }
+
+    return this.health <= 0;
+  }
+
+  /**
+   * Sovereign Wrath (R): Ignites Azrael's chest rune with blue-white energy and unleashes
+   * an immediate area-of-effect sword strike before entering Wrath Unbound stance.
+   */
+  public activateWrath(
+    azrael: AzraelModel,
+    particles: ParticleSystem,
+    enemies: EnemyInstance[] = [],
+    boss: BossInstance | null = null,
+    stats?: PlayerStats
+  ): { activated: boolean; embersGained: number; bossDefeated: boolean; bossStaggered: boolean; hitLanded: boolean } {
+    if (this.disposed || this.wrath < 50 || azrael.isDead) {
+      return { activated: false, embersGained: 0, bossDefeated: false, bossStaggered: false, hitLanded: false };
+    }
+    this.clearWrathTimer();
+    this.wrath = 0;
+    azrael.setStance('wrath_unbound');
+    azrael.triggerSovereignWrathStrike();
+    soundEngine.playWrathActivation();
+    soundEngine.playSovereignWrathStrike();
+
+    const origin = azrael.group.position;
+    const forward = azrael.getForwardVector();
+    const aoeCenter = origin.clone().addScaledVector(forward, 1.5);
+
+    // Blue-white Sovereign Wrath AoE visuals
+    particles.spawnGroundShockwave(origin, 6.8, 0xe0f2fe);
+    particles.spawnGroundShockwave(aoeCenter, 5.4, 0x60a5fa);
+    particles.spawnSlashArc(origin, azrael.group.rotation, 0x93c5fd, true);
+    particles.spawnSparks(origin.clone().add(new THREE.Vector3(0, 1.2, 0)), 48, 0xbae6fd);
+
+    const aoeDamage = Math.round(115 + (stats ? stats.strength * 2.5 + stats.arcane * 3.5 : 60));
+    const aoeRadius = 5.6;
+    let embersGained = 0;
+    let hitLanded = false;
+    let bossStaggered = false;
+    let bossDefeated = false;
+
+    for (const enemy of enemies) {
+      if (enemy.isDead) continue;
+      if (enemy.group.position.distanceTo(origin) <= aoeRadius) {
+        hitLanded = true;
+        enemy.takeDamage(aoeDamage);
+        particles.spawnSparks(enemy.group.position, 18, 0x93c5fd);
+        const push = new THREE.Vector3().subVectors(enemy.group.position, origin).setY(0);
+        if (push.lengthSq() > 0.001) {
+          enemy.group.position.addScaledVector(push.normalize(), 1.8);
+        }
+        if (enemy.isDead) {
+          embersGained += enemy.stats.emberReward;
+          this.awardEnemyDefeatHealth(enemy);
+        }
+      }
+    }
+
+    if (boss && !boss.isDead && boss.group.position.distanceTo(origin) <= aoeRadius + 1.6) {
+      hitLanded = true;
+      const triggered = boss.takeDamage(aoeDamage, true);
+      if (triggered) {
+        bossStaggered = true;
+        particles.spawnStaggerBurst(boss.group.position, 0xfbbf24);
+        soundEngine.playStaggerBreak();
+      } else {
+        particles.spawnSparks(boss.group.position, 32, 0x93c5fd);
+      }
+      if (boss.isDead) {
+        bossDefeated = true;
+        embersGained += 500 + boss.realmId * 250;
+        this.awardBossDefeatHealth(boss.name);
+      }
+    }
+
+    if (hitLanded) {
+      this.registerHitLanded();
+      this.triggerHitstop(0.08);
+    }
+
+    // Stance wears off after 15 seconds (tracked & guarded against reset/death/disposal)
+    const wrathToken = this.wrathGeneration;
+    this.wrathTimerId = setTimeout(() => {
+      if (this.disposed || wrathToken !== this.wrathGeneration) return;
+      this.wrathTimerId = null;
+      if (!azrael.isDead && azrael.currentStance === 'wrath_unbound') {
+        azrael.setStance('reaper');
+      }
+    }, 15000);
+
+    return { activated: true, embersGained, bossDefeated, bossStaggered, hitLanded };
+  }
+
+  public executeDevourSkill(
+    playerPos: THREE.Vector3,
+    playerForward: THREE.Vector3,
+    enemies: EnemyInstance[],
+    boss: BossInstance | null,
+    particles: ParticleSystem
+  ): { hit: boolean; healed: number; damageDealt: number } {
+    if (this.devourCooldownTimer > 0) return { hit: false, healed: 0, damageDealt: 0 };
+    this.devourCooldownTimer = 10.0;
+    let hit = false;
+    let totalHeal = 0;
+    let totalDmg = 0;
+
+    // Phantom maw visual eruption
+    const mawPos = playerPos.clone().addScaledVector(playerForward, 2.2);
+    particles.spawnGroundShockwave(mawPos, 4.5, 0xdc2626);
+    particles.spawnSparks(mawPos, 32, 0x84cc16);
+    soundEngine.playHitImpact(true);
+
+    const hitRange = 4.2;
+    for (const enemy of enemies) {
+      if (enemy.isDead) continue;
+      const dist = enemy.group.position.distanceTo(playerPos);
+      if (dist <= hitRange) {
+        hit = true;
+        const dmg = 95;
+        enemy.takeDamage(dmg);
+        totalDmg += dmg;
+        totalHeal += 30;
+        particles.spawnBlood(enemy.group.position, 18);
+      }
+    }
+
+    if (boss && !boss.isDead && boss.group.position.distanceTo(playerPos) <= hitRange + 1.8) {
+      hit = true;
+      const dmg = 125;
+      boss.takeDamage(dmg, true);
+      totalDmg += dmg;
+      totalHeal += 45;
+      particles.spawnBlood(boss.group.position, 28);
+    }
+
+    if (hit) {
+      this.health = Math.min(this.maxHealth, this.health + totalHeal);
+      this.wrath = Math.min(this.maxWrath, this.wrath + 40);
+      this.healIndicatorTimer = 2.0;
+    }
+
+    return { hit, healed: totalHeal, damageDealt: totalDmg };
+  }
+
+  private triggerHitstop(duration: number) {
+    this.hitstopTimer = duration;
+  }
+
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.clearWrathTimer();
+    this.floatingTexts = [];
+    this.awardedDefeatHealthEnemyIds.clear();
+  }
+}

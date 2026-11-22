@@ -1,0 +1,20 @@
+# THE SEVEN HELLGATES — STAGE 1 PRE-MODIFICATION BACKUP MANIFEST
+# Created: 2026-11-21T18:14:53Z
+# Format: ORIGINAL_PATH | BACKUP_PATH | BYTES | SHA256 | VERIFY
+
+src/azrael/AzraelTransformationController.ts | .backups/stage1_pre/src/azrael/AzraelTransformationController.ts.bak | 5933 | bdee0aac1a2244694939e38ba4db58c239d91d1cd9c346d53c0b867d969b1dc3 | MATCH
+src/azrael/AzraelEffectsController.ts | .backups/stage1_pre/src/azrael/AzraelEffectsController.ts.bak | 7150 | c9d4b54da0c83751595af94cf0a7e8d80bda56106e5f397c180a03f0f193b116 | MATCH
+src/azrael/ProceduralAzraelRig.ts | .backups/stage1_pre/src/azrael/ProceduralAzraelRig.ts.bak | 56736 | 05863fd054dceb6885777baf9d9a1c052f98d6308246c69f1899688c11ae97af | MATCH
+src/azrael/AzraelIKController.ts | .backups/stage1_pre/src/azrael/AzraelIKController.ts.bak | 10112 | 38fffab5cc30b2a45535f804d7213e419044972fc418f0369fcb21fc3ba7c184 | MATCH
+src/azrael/AzraelAnimationController.ts | .backups/stage1_pre/src/azrael/AzraelAnimationController.ts.bak | 8234 | 8ad6d70bfaf2b63e415f9567d49cad7b398539a50037bff86267f2296721dd50 | MATCH
+src/azrael/AzraelAssetLoader.ts | .backups/stage1_pre/src/azrael/AzraelAssetLoader.ts.bak | 9821 | cd6ebd54e01904ac42a7c592bec5e79d4e106876d486592cf7277c291cbee7ef | MATCH
+src/azrael/AzraelCharacter.ts | .backups/stage1_pre/src/azrael/AzraelCharacter.ts.bak | 9510 | c1711c823cd9412140a853040840042619b4196b35871cc6a5cf1b93ce44fd2c | MATCH
+src/azrael/types.ts | .backups/stage1_pre/src/azrael/types.ts.bak | 7718 | 1e0dbc03881ef1798e2cc2745c37cbb055d6786d2cdaed95f2859e03137fec45 | MATCH
+src/azrael/PUBLIC_API.md | .backups/stage1_pre/src/azrael/PUBLIC_API.md.bak | 7053 | bf6c1cc6c777ff63e9f57b0dc54e3f043b86b477c7c437c47d34609bb0d43f5e | MATCH
+src/dev/AzraelViewerSandbox.tsx | .backups/stage1_pre/src/dev/AzraelViewerSandbox.tsx.bak | 49583 | fde47b43db2851ffed3b2258ce21dcd56b45c7e944c60a72ec60a54c94ed38ea | MATCH
+src/game/loaders/GLBModelLoader.ts | .backups/stage1_pre/src/game/loaders/GLBModelLoader.ts.bak | 2483 | 7d8fff6db1123df525b93373dc3c9b012fcc3eccc17f190989858dd949b2d2f0 | MATCH
+src/game/entities/AzraelModel.ts | .backups/stage1_pre/src/game/entities/AzraelModel.ts.bak | 47933 | 32bf6659375489c7b19a35a2604998c485093ede960baf111a8a365df8fa03ee | MATCH
+src/components/BlenderStudioModal.tsx | .backups/stage1_pre/src/components/BlenderStudioModal.tsx.bak | 31097 | 9c49c4d446c842a0d62f6ad57a9de48a2b5a8996fd756d7769089fb6e23217ca | MATCH
+src/game/combat/CombatSystem.ts | .backups/stage1_pre/src/game/combat/CombatSystem.ts.bak | 21102 | 353b7bd511e44c272f719e12cbe2fa987eeb3cd4d68be77de3f80a4c81b9e3ee | MATCH
+src/game/HellgatesGame.ts | .backups/stage1_pre/src/game/HellgatesGame.ts.bak | 104888 | bb2642f97acafc40c5c64c48f73fff3d55a6e8ab15066a893d500420023fdcd9 | MATCH
+src/game/arsenal/SevenfoldWeaponFactory.ts | .backups/stage1_pre/src/game/arsenal/SevenfoldWeaponFactory.ts.bak | 11154 | 14bbbd95e1b4294abb1519c6ab3d8911e0e323c8a51e134bea04b64c6cc34e0f | MATCH

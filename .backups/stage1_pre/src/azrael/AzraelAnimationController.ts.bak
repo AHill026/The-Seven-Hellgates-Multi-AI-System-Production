@@ -1,0 +1,259 @@
+import * as THREE from 'three';
+import {
+  AZRAEL_ACTION_CATALOG,
+  AzraelActionId,
+  AzraelAnimationEventListener,
+  AzraelPlaybackInfo,
+} from './types';
+import { AzraelAnimationEventDispatcher } from './AzraelAnimationEvents';
+
+export class AzraelAnimationController {
+  public readonly mixer: THREE.AnimationMixer;
+  public readonly events: AzraelAnimationEventDispatcher;
+  private root: THREE.Object3D;
+  private clips: THREE.AnimationClip[];
+  private actions = new Map<AzraelActionId, THREE.AnimationAction>();
+  private currentActionId: AzraelActionId = 'IDLE';
+  private activeAction: THREE.AnimationAction | null = null;
+  private paused = false;
+  private timeScale = 1.0;
+  private loopOverride: boolean | null = null;
+  private lastUpdateMs = 0;
+
+  private prevNormalizedTime = 0;
+  private actionJustStarted = false;
+  private disposed = false;
+
+  constructor(root: THREE.Object3D, clips: THREE.AnimationClip[]) {
+    this.root = root;
+    this.mixer = new THREE.AnimationMixer(root);
+    this.events = new AzraelAnimationEventDispatcher();
+    this.clips = clips;
+    this.indexClips();
+  }
+
+  private indexClips(): void {
+    this.actions.clear();
+    const actionIds = Object.keys(AZRAEL_ACTION_CATALOG) as AzraelActionId[];
+
+    for (const id of actionIds) {
+      const cfg = AZRAEL_ACTION_CATALOG[id];
+      let clip: THREE.AnimationClip | null | undefined = null;
+
+      for (const candidateName of cfg.clipNames) {
+        clip = THREE.AnimationClip.findByName(this.clips, candidateName);
+        if (clip) break;
+      }
+      if (!clip) {
+        clip = this.clips.find((c) =>
+          cfg.clipNames.some((n) => c.name.toLowerCase().includes(n.toLowerCase()))
+        );
+      }
+      if (!clip && this.clips.length > 0) {
+        clip = this.clips[0];
+      }
+
+      if (clip) {
+        const action = this.mixer.clipAction(clip);
+        action.loop = cfg.loop ? THREE.LoopRepeat : THREE.LoopOnce;
+        action.clampWhenFinished = !cfg.loop;
+        this.actions.set(id, action);
+      }
+    }
+  }
+
+  public onAnimationEvent(listener: AzraelAnimationEventListener): () => void {
+    return this.events.subscribe(listener);
+  }
+
+  public playAction(
+    actionId: AzraelActionId,
+    options?: { timeScale?: number; crossfade?: number; forceRestart?: boolean }
+  ): void {
+    if (this.disposed) return;
+    const nextAction = this.actions.get(actionId);
+    if (!nextAction) return;
+
+    const cfg = AZRAEL_ACTION_CATALOG[actionId];
+    const shouldLoop = this.loopOverride !== null ? this.loopOverride : cfg.loop;
+    nextAction.loop = shouldLoop ? THREE.LoopRepeat : THREE.LoopOnce;
+    nextAction.clampWhenFinished = !shouldLoop;
+
+    if (options?.timeScale !== undefined) {
+      this.timeScale = options.timeScale;
+    }
+
+    const fadeSec = options?.crossfade ?? cfg.crossfadeDuration;
+
+    if (this.activeAction === nextAction) {
+      if (options?.forceRestart || !shouldLoop) {
+        nextAction.reset();
+        nextAction.enabled = true;
+        nextAction.setEffectiveTimeScale(this.timeScale);
+        nextAction.setEffectiveWeight(1);
+        nextAction.play();
+        this.prevNormalizedTime = 0;
+        this.actionJustStarted = true;
+      }
+      this.currentActionId = actionId;
+      return;
+    }
+
+    nextAction.reset();
+    nextAction.enabled = true;
+    nextAction.setEffectiveTimeScale(this.timeScale);
+    nextAction.setEffectiveWeight(1);
+    nextAction.play();
+
+    if (this.activeAction && fadeSec > 0) {
+      this.activeAction.crossFadeTo(nextAction, fadeSec, false);
+    } else if (this.activeAction && fadeSec <= 0) {
+      this.activeAction.stop();
+    }
+
+    this.activeAction = nextAction;
+    this.currentActionId = actionId;
+    this.prevNormalizedTime = 0;
+    this.actionJustStarted = true;
+    this.mixer.timeScale = this.paused ? 0 : this.timeScale;
+  }
+
+  public playClipByName(clipName: string): void {
+    if (this.disposed) return;
+    const clip = THREE.AnimationClip.findByName(this.clips, clipName);
+    if (!clip) return;
+    const action = this.mixer.clipAction(clip);
+    action.reset();
+    action.enabled = true;
+    action.setEffectiveWeight(1);
+    action.play();
+    if (this.activeAction && this.activeAction !== action) {
+      this.activeAction.crossFadeTo(action, 0.2, false);
+    }
+    this.activeAction = action;
+    this.prevNormalizedTime = 0;
+    this.actionJustStarted = true;
+  }
+
+  public setPaused(paused: boolean): void {
+    this.paused = paused;
+    this.mixer.timeScale = paused ? 0 : this.timeScale;
+  }
+
+  public setTimeScale(scale: number): void {
+    this.timeScale = THREE.MathUtils.clamp(scale, 0.1, 2.5);
+    if (!this.paused) {
+      this.mixer.timeScale = this.timeScale;
+    }
+  }
+
+  public setLoopOverride(loop: boolean | null): void {
+    this.loopOverride = loop;
+    if (this.activeAction) {
+      const cfg = AZRAEL_ACTION_CATALOG[this.currentActionId];
+      const shouldLoop = loop !== null ? loop : cfg.loop;
+      this.activeAction.loop = shouldLoop ? THREE.LoopRepeat : THREE.LoopOnce;
+      this.activeAction.clampWhenFinished = !shouldLoop;
+      this.activeAction.enabled = true;
+      if (shouldLoop && !this.activeAction.isRunning()) {
+        this.activeAction.play();
+      }
+    }
+  }
+
+  public scrubNormalized(normalizedTime: number): void {
+    if (!this.activeAction || this.disposed) return;
+    const clip = this.activeAction.getClip();
+    const norm = THREE.MathUtils.clamp(normalizedTime, 0, 1);
+    const t = norm * Math.max(0.001, clip.duration);
+    this.activeAction.enabled = true;
+    this.activeAction.paused = false;
+    this.activeAction.time = t;
+    const prevScale = this.mixer.timeScale;
+    this.mixer.timeScale = 1;
+    this.mixer.update(0);
+    this.mixer.timeScale = prevScale;
+    this.prevNormalizedTime = norm;
+  }
+
+  public update(delta: number): number {
+    if (this.disposed) return 0;
+    const start = performance.now();
+
+    if (!this.paused) {
+      this.mixer.update(delta);
+    } else {
+      this.mixer.update(0);
+    }
+
+    if (this.activeAction && !this.paused) {
+      const clip = this.activeAction.getClip();
+      const duration = Math.max(0.0001, clip.duration);
+      const isLooping = this.activeAction.loop === THREE.LoopRepeat;
+      const rawTime = this.activeAction.time;
+      const currNorm = isLooping
+        ? (rawTime % duration) / duration
+        : THREE.MathUtils.clamp(rawTime / duration, 0, 1);
+
+      this.events.evaluateTransition(
+        this.currentActionId,
+        clip.name,
+        this.prevNormalizedTime,
+        currNorm,
+        duration,
+        isLooping,
+        this.actionJustStarted
+      );
+
+      this.prevNormalizedTime = currNorm;
+      this.actionJustStarted = false;
+    }
+
+    this.lastUpdateMs = performance.now() - start;
+    return this.lastUpdateMs;
+  }
+
+  public getCurrentActionId(): AzraelActionId {
+    return this.currentActionId;
+  }
+
+  public getDefaultOffhandIKForCurrentAction(): number {
+    return AZRAEL_ACTION_CATALOG[this.currentActionId]?.defaultOffhandIK ?? 1.0;
+  }
+
+  public getPlaybackInfo(): AzraelPlaybackInfo {
+    const clip = this.activeAction?.getClip();
+    const duration = clip?.duration ?? 1;
+    const currentTime = this.activeAction ? this.activeAction.time % Math.max(0.001, duration) : 0;
+    const clampedTime =
+      this.activeAction && this.activeAction.loop === THREE.LoopOnce
+        ? Math.min(this.activeAction.time, duration)
+        : currentTime;
+
+    return {
+      currentAction: this.currentActionId,
+      clipName: clip?.name ?? 'None',
+      currentTime: clampedTime,
+      duration,
+      normalizedTime: duration > 0 ? THREE.MathUtils.clamp(clampedTime / duration, 0, 1) : 0,
+      paused: this.paused,
+      timeScale: this.timeScale,
+      loop: this.activeAction ? this.activeAction.loop === THREE.LoopRepeat : true,
+      availableClips: this.clips.map((c) => c.name),
+    };
+  }
+
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.mixer.stopAllAction();
+    for (const clip of this.clips) {
+      this.mixer.uncacheAction(clip, this.root);
+      this.mixer.uncacheClip(clip);
+    }
+    this.mixer.uncacheRoot(this.root);
+    this.actions.clear();
+    this.events.clear();
+    this.activeAction = null;
+  }
+}

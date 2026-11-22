@@ -1,0 +1,322 @@
+import * as THREE from 'three';
+import {
+  AzraelActionId,
+  AzraelAnimationEventListener,
+  AzraelHoodState,
+  AzraelLODLevel,
+  AzraelMaterialInspectionMode,
+  AzraelPerformanceStats,
+  AzraelPlaybackInfo,
+  AzraelSocketName,
+  AzraelTransformState,
+  AzraelWeaponAttachment,
+  IAzraelCharacter,
+  LoadedAzraelAsset,
+} from './types';
+import { AzraelAnimationController } from './AzraelAnimationController';
+import { AzraelWeaponController } from './AzraelWeaponController';
+import { AzraelIKController } from './AzraelIKController';
+import { AzraelEffectsController } from './AzraelEffectsController';
+import { AzraelTransformationController } from './AzraelTransformationController';
+import { AzraelPerformanceMonitor } from './AzraelPerformanceMonitor';
+
+export class AzraelCharacter implements IAzraelCharacter {
+  public readonly root: THREE.Group;
+  private readonly asset: LoadedAzraelAsset;
+  private readonly animation: AzraelAnimationController;
+  private readonly weapon: AzraelWeaponController;
+  private readonly ik: AzraelIKController;
+  private readonly effects: AzraelEffectsController;
+  private readonly transformation: AzraelTransformationController;
+  private readonly perfMonitor: AzraelPerformanceMonitor;
+
+  private currentLOD: AzraelLODLevel = 'LOD0';
+  private skeletonHelper: THREE.SkeletonHelper | null = null;
+  private socketHelpers: THREE.AxesHelper[] = [];
+  private showSockets = false;
+  private readonly offhandGripScratch = new THREE.Vector3();
+  private lastAnimationMs = 0;
+  private _isDisposed = false;
+
+  constructor(asset: LoadedAzraelAsset) {
+    this.asset = asset;
+    this.root = asset.root;
+    this.animation = new AzraelAnimationController(this.root, asset.clips);
+    this.weapon = new AzraelWeaponController(asset);
+    this.ik = new AzraelIKController(asset);
+    this.effects = new AzraelEffectsController(asset);
+    this.transformation = new AzraelTransformationController(asset, this.effects);
+    this.perfMonitor = new AzraelPerformanceMonitor();
+
+    this.setLOD('LOD0');
+    this.playAction('IDLE', { crossfade: 0 });
+  }
+
+  public get isDisposed(): boolean {
+    return this._isDisposed;
+  }
+
+  public getAssetSourceLabel(): string {
+    return this.asset.sourceLabel;
+  }
+
+  public getBoneNames(): string[] {
+    return this.asset.bones.map((b) => b.name);
+  }
+
+  public getSocketWorldPosition(
+    socket: AzraelSocketName,
+    out: THREE.Vector3
+  ): THREE.Vector3 | null {
+    const obj = this.asset.sockets[socket];
+    if (!obj) return null;
+    obj.updateMatrixWorld(true);
+    return obj.getWorldPosition(out);
+  }
+
+  public performAction(
+    action: AzraelActionId,
+    options?: { timeScale?: number; crossfade?: number; forceRestart?: boolean }
+  ): void {
+    this.playAction(action, options);
+  }
+
+  public playAction(
+    action: AzraelActionId,
+    options?: { timeScale?: number; crossfade?: number; forceRestart?: boolean }
+  ): void {
+    if (this._isDisposed) return;
+    this.animation.playAction(action, options);
+    const snapIK = options?.crossfade === 0;
+    this.ik.setAutoTargetWeight(
+      this.animation.getDefaultOffhandIKForCurrentAction(),
+      snapIK
+    );
+  }
+
+  public playClipByName(clipName: string): void {
+    if (this._isDisposed) return;
+    this.animation.playClipByName(clipName);
+  }
+
+  public setAnimationSpeed(scale: number): void {
+    if (this._isDisposed) return;
+    this.animation.setTimeScale(scale);
+  }
+
+  public setAnimationPaused(paused: boolean): void {
+    if (this._isDisposed) return;
+    this.animation.setPaused(paused);
+  }
+
+  public setAnimationLoopMode(loop: boolean | null): void {
+    if (this._isDisposed) return;
+    this.animation.setLoopOverride(loop);
+  }
+
+  public scrubAnimation(normalizedTime: number): void {
+    if (this._isDisposed) return;
+    this.animation.scrubNormalized(normalizedTime);
+  }
+
+  public getPlaybackInfo(): AzraelPlaybackInfo {
+    return this.animation.getPlaybackInfo();
+  }
+
+  public attachWeapon(): void {
+    this.setWeaponAttachment('Weapon_R');
+  }
+
+  public sheatheWeapon(): void {
+    this.setWeaponAttachment('Weapon_Back');
+  }
+
+  public setWeaponAttachment(attachment: AzraelWeaponAttachment): void {
+    if (this._isDisposed) return;
+    this.weapon.attachTo(attachment);
+  }
+
+  public getWeaponAttachment(): AzraelWeaponAttachment {
+    return this.weapon.getAttachment();
+  }
+
+  public setOffhandIKWeight(weight: number | null): void {
+    if (this._isDisposed) return;
+    this.ik.setManualOverride(weight);
+  }
+
+  public getEffectiveOffhandIKWeight(): number {
+    return this.ik.getEffectiveWeight();
+  }
+
+  public getOffhandGripErrorMeters(): number {
+    return this.ik.getLastDistanceError();
+  }
+
+  public getOffhandIKReachUtilization(): number {
+    return this.ik.getLastReachUtilization();
+  }
+
+  public setTransformationState(state: AzraelTransformState): void {
+    if (this._isDisposed) return;
+    this.transformation.setState(state);
+  }
+
+  public getTransformationState(): AzraelTransformState {
+    return this.transformation.getState();
+  }
+
+  public setLOD(lod: AzraelLODLevel): void {
+    if (this._isDisposed) return;
+    this.currentLOD = lod;
+    const lods: AzraelLODLevel[] = ['LOD0', 'LOD1', 'LOD2'];
+    for (const key of lods) {
+      this.asset.lodGroups[key].forEach((obj) => {
+        obj.visible = false;
+      });
+    }
+    this.asset.lodGroups[lod].forEach((obj) => {
+      obj.visible = true;
+    });
+  }
+
+  public getLOD(): AzraelLODLevel {
+    return this.currentLOD;
+  }
+
+  public setHoodState(state: AzraelHoodState): void {
+    if (this._isDisposed) return;
+    this.effects.setHoodState(state);
+  }
+
+  public getHoodState(): AzraelHoodState {
+    return this.effects.getHoodState();
+  }
+
+  public setCloakMotionEnabled(enabled: boolean): void {
+    if (this._isDisposed) return;
+    this.effects.setCloakMotionEnabled(enabled);
+  }
+
+  public isCloakMotionEnabled(): boolean {
+    return this.effects.isCloakMotionEnabled();
+  }
+
+  public setMaterialInspectionMode(mode: AzraelMaterialInspectionMode): void {
+    if (this._isDisposed) return;
+    this.transformation.setMaterialInspectionMode(mode);
+  }
+
+  public getMaterialInspectionMode(): AzraelMaterialInspectionMode {
+    return this.transformation.getMaterialInspectionMode();
+  }
+
+  public onAnimationEvent(listener: AzraelAnimationEventListener): () => void {
+    if (this._isDisposed) return () => {};
+    return this.animation.onAnimationEvent(listener);
+  }
+
+  public attachSkeletonHelper(scene: THREE.Scene, visible: boolean): void {
+    if (this._isDisposed) return;
+    if (!this.skeletonHelper) {
+      this.skeletonHelper = new THREE.SkeletonHelper(this.root);
+      const mat = this.skeletonHelper.material as THREE.LineBasicMaterial;
+      mat.color.setHex(0x38bdf8);
+      mat.depthTest = false;
+      mat.transparent = true;
+      mat.opacity = 0.85;
+      this.skeletonHelper.renderOrder = 999;
+      scene.add(this.skeletonHelper);
+    }
+    this.skeletonHelper.visible = visible;
+  }
+
+  public setSocketMarkersVisible(visible: boolean): void {
+    if (this._isDisposed) return;
+    this.showSockets = visible;
+    if (visible && this.socketHelpers.length === 0) {
+      const names: AzraelSocketName[] = [
+        'Weapon_R',
+        'Weapon_Back',
+        'Weapon_OffhandGrip',
+        'VFX_Chest',
+        'VFX_Aura',
+      ];
+      names.forEach((name) => {
+        const sock = this.asset.sockets[name];
+        if (!sock) return;
+        const axes = new THREE.AxesHelper(0.18);
+        axes.name = `SocketAxes_${name}`;
+        sock.add(axes);
+        this.socketHelpers.push(axes);
+      });
+    }
+    this.socketHelpers.forEach((h) => {
+      h.visible = this.showSockets;
+    });
+  }
+
+  public getLastAnimationMs(): number {
+    return this.lastAnimationMs;
+  }
+
+  public getPerformanceStats(
+    renderer: THREE.WebGLRenderer,
+    scene: THREE.Scene,
+    isSoftwareGl: boolean,
+    postFxMs = 0
+  ): AzraelPerformanceStats {
+    return this.perfMonitor.getStats(
+      renderer,
+      scene,
+      this.asset,
+      this.currentLOD,
+      isSoftwareGl,
+      postFxMs
+    );
+  }
+
+  public update(delta: number, elapsed: number, postFxMs = 0): void {
+    if (this._isDisposed) return;
+    const safeDt = Math.min(0.05, Math.max(0.0001, delta));
+
+    // 1. Evaluate AnimationMixer clips & animation event thresholds
+    this.lastAnimationMs = this.animation.update(safeDt);
+
+    // 2. Apply post-animation transformation & socket effects (incl. hood & cloak motion)
+    this.transformation.update(safeDt, elapsed);
+    this.effects.update(safeDt, elapsed);
+
+    // 3. Solve analytical two-bone off-hand IK toward Weapon_OffhandGrip
+    const weaponInHand = this.weapon.isWeaponInHand();
+    this.weapon.getOffhandGripWorldPosition(this.offhandGripScratch);
+    this.ik.solve(safeDt, weaponInHand, this.offhandGripScratch);
+
+    this.perfMonitor.recordFrame(safeDt, this.lastAnimationMs, postFxMs);
+  }
+
+  public dispose(scene?: THREE.Scene): void {
+    if (this._isDisposed) return;
+    this._isDisposed = true;
+
+    if (this.skeletonHelper) {
+      (scene ?? this.skeletonHelper.parent)?.remove(this.skeletonHelper);
+      this.skeletonHelper.dispose();
+      this.skeletonHelper = null;
+    }
+
+    this.socketHelpers.forEach((h) => {
+      h.parent?.remove(h);
+      h.dispose();
+    });
+    this.socketHelpers = [];
+
+    this.root.parent?.remove(this.root);
+
+    this.animation.dispose();
+    this.ik.dispose();
+    this.transformation.dispose();
+    this.effects.dispose();
+    this.asset.dispose();
+  }
+}

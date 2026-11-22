@@ -1,0 +1,6 @@
+{
+  "name": "The Seven Hellgates",
+  "description": "A 3D dark-fantasy action RPG where Azrael battles through seven demonic realms to confront terrifying rulers and uncover the secret beyond the final gate.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

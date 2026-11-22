@@ -1,0 +1,1707 @@
+import * as THREE from 'three';
+import {
+  AzraelLODLevel,
+  AzraelSocketName,
+  LoadedAzraelAsset,
+} from './types';
+
+interface SkinnedPartSpec {
+  geometry: THREE.BufferGeometry;
+  materialIndex: number;
+  weights: Array<{ bone: string; weight: number }>;
+  minYBlend?: { boneA: string; boneB: string; yMin: number; yMax: number };
+  multiYBlend?: Array<{ bone: string; y: number }>;
+}
+
+interface ProceduralRigMaterials {
+  armor: THREE.MeshStandardMaterial;
+  armorTrim: THREE.MeshStandardMaterial;
+  leather: THREE.MeshStandardMaterial;
+  cloth: THREE.MeshStandardMaterial;
+  skin: THREE.MeshStandardMaterial;
+  hair: THREE.MeshStandardMaterial;
+  eyes: THREE.MeshStandardMaterial;
+  chestRune: THREE.MeshStandardMaterial;
+  bladeMetal: THREE.MeshStandardMaterial;
+  bladeRune: THREE.MeshStandardMaterial;
+}
+
+const MAT_ARMOR = 0;
+const MAT_ARMOR_TRIM = 1;
+const MAT_LEATHER = 2;
+const MAT_CLOTH = 3;
+const MAT_SKIN = 4;
+const MAT_HAIR = 5;
+const MAT_EYES = 6;
+const MAT_CHEST_RUNE = 7;
+
+function createProceduralMaterials(): ProceduralRigMaterials {
+  return {
+    armor: new THREE.MeshStandardMaterial({
+      name: 'Azrael_BlackenedPlate',
+      color: 0x1b1e26,
+      metalness: 0.84,
+      roughness: 0.36,
+      emissive: 0x090c14,
+      emissiveIntensity: 0.15,
+    }),
+    armorTrim: new THREE.MeshStandardMaterial({
+      name: 'Azrael_AgedIronTrim',
+      color: 0x3b404d,
+      metalness: 0.9,
+      roughness: 0.28,
+      emissive: 0x162235,
+      emissiveIntensity: 0.12,
+    }),
+    leather: new THREE.MeshStandardMaterial({
+      name: 'Azrael_WornLeather',
+      color: 0x261c18,
+      metalness: 0.08,
+      roughness: 0.78,
+    }),
+    cloth: new THREE.MeshStandardMaterial({
+      name: 'Azrael_WeatheredCloak',
+      color: 0x14161d,
+      metalness: 0.04,
+      roughness: 0.92,
+      side: THREE.DoubleSide,
+    }),
+    skin: new THREE.MeshStandardMaterial({
+      name: 'Azrael_HumanSkin',
+      color: 0xbfa090,
+      metalness: 0.02,
+      roughness: 0.62,
+    }),
+    hair: new THREE.MeshStandardMaterial({
+      name: 'Azrael_DarkHair',
+      color: 0x18171c,
+      metalness: 0.05,
+      roughness: 0.72,
+    }),
+    eyes: new THREE.MeshStandardMaterial({
+      name: 'Azrael_PaleBlueEyes',
+      color: 0xbfeaff,
+      emissive: 0x67d4ff,
+      emissiveIntensity: 1.35,
+      metalness: 0.05,
+      roughness: 0.18,
+    }),
+    chestRune: new THREE.MeshStandardMaterial({
+      name: 'Azrael_ChestRuneInlay',
+      color: 0x93d9ff,
+      emissive: 0x38bdf8,
+      emissiveIntensity: 0.85,
+      metalness: 0.35,
+      roughness: 0.22,
+    }),
+    bladeMetal: new THREE.MeshStandardMaterial({
+      name: 'Azrael_GreatswordSteel',
+      color: 0x2c323f,
+      metalness: 0.92,
+      roughness: 0.24,
+    }),
+    bladeRune: new THREE.MeshStandardMaterial({
+      name: 'Azrael_GreatswordRune',
+      color: 0x7dd3fc,
+      emissive: 0x38bdf8,
+      emissiveIntensity: 0.55,
+      metalness: 0.4,
+      roughness: 0.25,
+    }),
+  };
+}
+
+function addBoneDef(
+  boneMap: Map<string, THREE.Bone>,
+  boneWorldPositions: Map<string, THREE.Vector3>,
+  bones: THREE.Bone[],
+  name: string,
+  parentName: string | null,
+  worldPos: [number, number, number]
+): THREE.Bone {
+  const bone = new THREE.Bone();
+  bone.name = name;
+  const wp = new THREE.Vector3(worldPos[0], worldPos[1], worldPos[2]);
+  boneWorldPositions.set(name, wp);
+
+  if (parentName) {
+    const parent = boneMap.get(parentName);
+    const parentWp = boneWorldPositions.get(parentName);
+    if (!parent || !parentWp) {
+      throw new Error(`Missing parent bone "${parentName}" for "${name}"`);
+    }
+    bone.position.copy(wp).sub(parentWp);
+    parent.add(bone);
+  } else {
+    bone.position.copy(wp);
+  }
+
+  boneMap.set(name, bone);
+  bones.push(bone);
+  return bone;
+}
+
+function buildCanonicalSkeleton(): {
+  rootBone: THREE.Bone;
+  bones: THREE.Bone[];
+  boneIndexMap: Map<string, number>;
+  boneMap: Map<string, THREE.Bone>;
+  skeleton: THREE.Skeleton;
+} {
+  const bones: THREE.Bone[] = [];
+  const boneMap = new Map<string, THREE.Bone>();
+  const boneWorldPositions = new Map<string, THREE.Vector3>();
+
+  // 1-2: Root & Pelvis
+  const rootBone = addBoneDef(boneMap, boneWorldPositions, bones, 'Root', null, [0, 0, 0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Hips', 'Root', [0, 1.03, 0]);
+
+  // 3-10: Spine, Neck, Head & Facial Anchors
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Spine', 'Hips', [0, 1.15, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Spine1', 'Spine', [0, 1.31, 0.01]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Spine2', 'Spine1', [0, 1.48, 0.01]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Neck', 'Spine2', [0, 1.63, 0.02]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Head', 'Neck', [0, 1.72, 0.03]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Jaw', 'Head', [0, 1.74, 0.06]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Eye_L', 'Head', [0.034, 1.825, 0.115]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Eye_R', 'Head', [-0.034, 1.825, 0.115]);
+
+  // 11-15: Separate Hood & Bounded Cloak Chain
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Hood_Crown', 'Spine2', [0, 1.88, -0.02]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Hood_Back', 'Spine2', [0, 1.68, -0.11]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Cloak_Upper', 'Spine2', [0, 1.56, -0.15]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Cloak_Mid', 'Cloak_Upper', [0, 1.10, -0.22]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Cloak_Lower', 'Cloak_Mid', [0, 0.56, -0.27]);
+
+  // 16-23: Left Arm (Off-hand IK chain) & Left Pauldron
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Clavicle_L', 'Spine2', [0.08, 1.56, 0.01]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'UpperArm_L', 'Clavicle_L', [0.23, 1.54, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'ForeArm_L', 'UpperArm_L', [0.30, 1.24, 0.01]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Hand_L', 'ForeArm_L', [0.35, 0.96, 0.04]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Thumb_L', 'Hand_L', [0.34, 0.92, 0.08]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Index_L', 'Hand_L', [0.36, 0.88, 0.06]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Grip_L', 'Hand_L', [0.35, 0.88, 0.02]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Pauldron_L', 'UpperArm_L', [0.27, 1.58, 0.0]);
+
+  // 24-31: Right Arm (Primary Sword Arm) & Right Pauldron
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Clavicle_R', 'Spine2', [-0.08, 1.56, 0.01]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'UpperArm_R', 'Clavicle_R', [-0.23, 1.54, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'ForeArm_R', 'UpperArm_R', [-0.30, 1.24, 0.01]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Hand_R', 'ForeArm_R', [-0.35, 0.96, 0.04]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Thumb_R', 'Hand_R', [-0.34, 0.92, 0.08]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Index_R', 'Hand_R', [-0.36, 0.88, 0.06]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Grip_R', 'Hand_R', [-0.35, 0.88, 0.02]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Pauldron_R', 'UpperArm_R', [-0.27, 1.58, 0.0]);
+
+  // 32-36: Left Leg & Tasset
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Thigh_L', 'Hips', [0.115, 0.97, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Shin_L', 'Thigh_L', [0.12, 0.53, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Foot_L', 'Shin_L', [0.125, 0.10, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Toe_L', 'Foot_L', [0.125, 0.03, 0.13]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Tasset_L', 'Hips', [0.18, 0.98, 0.02]);
+
+  // 37-41: Right Leg & Tasset
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Thigh_R', 'Hips', [-0.115, 0.97, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Shin_R', 'Thigh_R', [-0.12, 0.53, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Foot_R', 'Shin_R', [-0.125, 0.10, 0.0]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Toe_R', 'Foot_R', [-0.125, 0.03, 0.13]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Tasset_R', 'Hips', [-0.18, 0.98, 0.02]);
+
+  // 42-72: Rigid Armor Mounts, Hood Folds, Skirt Panels, Simplified Digit Tips & VFX Root
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Brow_L', 'Head', [0.038, 1.855, 0.12]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Brow_R', 'Head', [-0.038, 1.855, 0.12]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Scarf_Front', 'Spine2', [0, 1.57, 0.11]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'ChestPlate', 'Spine2', [0, 1.46, 0.11]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'BackPlate', 'Spine2', [0, 1.48, -0.10]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Belt_Center', 'Hips', [0, 1.07, 0.11]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Coat_Front_L', 'Hips', [0.10, 0.92, 0.10]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Coat_Front_R', 'Hips', [-0.10, 0.92, 0.10]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Coat_Back_Upper', 'Hips', [0, 0.94, -0.11]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Coat_Back_Lower', 'Coat_Back_Upper', [0, 0.55, -0.14]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Gauntlet_L', 'ForeArm_L', [0.33, 1.08, 0.03]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Gauntlet_R', 'ForeArm_R', [-0.33, 1.08, 0.03]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Greave_L', 'Shin_L', [0.12, 0.30, 0.03]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Greave_R', 'Shin_R', [-0.12, 0.30, 0.03]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Knee_L', 'Shin_L', [0.12, 0.54, 0.06]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Knee_R', 'Shin_R', [-0.12, 0.54, 0.06]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'WingRoot_L', 'Spine2', [0.09, 1.52, -0.12]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'WingTip_L', 'WingRoot_L', [0.22, 1.66, -0.18]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'WingRoot_R', 'Spine2', [-0.09, 1.52, -0.12]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'WingTip_R', 'WingRoot_R', [-0.22, 1.66, -0.18]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Hood_Side_L', 'Hood_Crown', [0.11, 1.78, 0.03]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Hood_Side_R', 'Hood_Crown', [-0.11, 1.78, 0.03]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Cloak_Hem_L', 'Cloak_Lower', [0.24, 0.24, -0.28]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'Cloak_Hem_R', 'Cloak_Lower', [-0.24, 0.24, -0.28]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'ThumbTip_L', 'Thumb_L', [0.33, 0.89, 0.10]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'IndexTip_L', 'Index_L', [0.36, 0.84, 0.07]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'GripTip_L', 'Grip_L', [0.35, 0.84, 0.02]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'ThumbTip_R', 'Thumb_R', [-0.33, 0.89, 0.10]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'IndexTip_R', 'Index_R', [-0.36, 0.84, 0.07]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'GripTip_R', 'Grip_R', [-0.35, 0.84, 0.02]);
+  addBoneDef(boneMap, boneWorldPositions, bones, 'VFX_Root_Bone', 'Root', [0, 0.02, 0]);
+
+  const boneIndexMap = new Map<string, number>();
+  bones.forEach((b, idx) => boneIndexMap.set(b.name, idx));
+
+  const skeleton = new THREE.Skeleton(bones);
+  return { rootBone, bones, boneIndexMap, boneMap, skeleton };
+}
+
+function transformGeom(
+  geometry: THREE.BufferGeometry,
+  pos: [number, number, number],
+  rot: [number, number, number] = [0, 0, 0],
+  scale: [number, number, number] = [1, 1, 1]
+): THREE.BufferGeometry {
+  const g = geometry.index ? geometry.toNonIndexed() : geometry.clone();
+  const m = new THREE.Matrix4().compose(
+    new THREE.Vector3(pos[0], pos[1], pos[2]),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(rot[0], rot[1], rot[2])),
+    new THREE.Vector3(scale[0], scale[1], scale[2])
+  );
+  g.applyMatrix4(m);
+  if (!g.attributes.normal) g.computeVertexNormals();
+  if (!g.attributes.uv) {
+    const count = g.attributes.position.count;
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+  }
+  return g;
+}
+
+function createTaperedCylinder(
+  radiusTop: number,
+  radiusBottom: number,
+  height: number,
+  radialSegments: number,
+  heightSegments = 1
+): THREE.BufferGeometry {
+  return new THREE.CylinderGeometry(radiusTop, radiusBottom, height, radialSegments, heightSegments);
+}
+
+function mergeSkinnedParts(
+  parts: SkinnedPartSpec[],
+  boneIndexMap: Map<string, number>
+): THREE.BufferGeometry {
+  let totalVertices = 0;
+  for (const part of parts) {
+    totalVertices += part.geometry.attributes.position.count;
+  }
+
+  const positions = new Float32Array(totalVertices * 3);
+  const normals = new Float32Array(totalVertices * 3);
+  const uvs = new Float32Array(totalVertices * 2);
+  const skinIndices = new Uint16Array(totalVertices * 4);
+  const skinWeights = new Float32Array(totalVertices * 4);
+
+  const merged = new THREE.BufferGeometry();
+  let vertexCursor = 0;
+
+  for (const part of parts) {
+    const g = part.geometry;
+    const posAttr = g.attributes.position;
+    const normAttr = g.attributes.normal;
+    const uvAttr = g.attributes.uv;
+    const count = posAttr.count;
+
+    merged.addGroup(vertexCursor, count, part.materialIndex);
+
+    for (let i = 0; i < count; i++) {
+      const dst = vertexCursor + i;
+      const px = posAttr.getX(i);
+      const py = posAttr.getY(i);
+      const pz = posAttr.getZ(i);
+
+      positions[dst * 3] = px;
+      positions[dst * 3 + 1] = py;
+      positions[dst * 3 + 2] = pz;
+
+      normals[dst * 3] = normAttr.getX(i);
+      normals[dst * 3 + 1] = normAttr.getY(i);
+      normals[dst * 3 + 2] = normAttr.getZ(i);
+
+      uvs[dst * 2] = uvAttr ? uvAttr.getX(i) : 0;
+      uvs[dst * 2 + 1] = uvAttr ? uvAttr.getY(i) : 0;
+
+      if (part.multiYBlend && part.multiYBlend.length >= 2) {
+        const stops = part.multiYBlend;
+        if (py <= stops[0].y) {
+          skinIndices[dst * 4] = boneIndexMap.get(stops[0].bone) ?? 0;
+          skinWeights[dst * 4] = 1;
+        } else if (py >= stops[stops.length - 1].y) {
+          skinIndices[dst * 4] = boneIndexMap.get(stops[stops.length - 1].bone) ?? 0;
+          skinWeights[dst * 4] = 1;
+        } else {
+          for (let s = 0; s < stops.length - 1; s++) {
+            const a = stops[s];
+            const b = stops[s + 1];
+            if (py >= a.y && py <= b.y) {
+              const t = THREE.MathUtils.clamp((py - a.y) / Math.max(0.0001, b.y - a.y), 0, 1);
+              skinIndices[dst * 4] = boneIndexMap.get(a.bone) ?? 0;
+              skinIndices[dst * 4 + 1] = boneIndexMap.get(b.bone) ?? 0;
+              skinWeights[dst * 4] = 1 - t;
+              skinWeights[dst * 4 + 1] = t;
+              break;
+            }
+          }
+        }
+      } else if (part.minYBlend) {
+        const { boneA, boneB, yMin, yMax } = part.minYBlend;
+        const t = THREE.MathUtils.clamp((py - yMin) / Math.max(0.0001, yMax - yMin), 0, 1);
+        const idxA = boneIndexMap.get(boneA) ?? 0;
+        const idxB = boneIndexMap.get(boneB) ?? 0;
+        skinIndices[dst * 4] = idxA;
+        skinIndices[dst * 4 + 1] = idxB;
+        skinWeights[dst * 4] = 1 - t;
+        skinWeights[dst * 4 + 1] = t;
+      } else {
+        let sum = 0;
+        for (let slot = 0; slot < 4; slot++) {
+          const entry = part.weights[slot];
+          if (entry) {
+            skinIndices[dst * 4 + slot] = boneIndexMap.get(entry.bone) ?? 0;
+            skinWeights[dst * 4 + slot] = entry.weight;
+            sum += entry.weight;
+          }
+        }
+        if (sum > 0 && Math.abs(sum - 1) > 0.001) {
+          for (let slot = 0; slot < 4; slot++) {
+            skinWeights[dst * 4 + slot] /= sum;
+          }
+        }
+      }
+    }
+
+    vertexCursor += count;
+    g.dispose();
+  }
+
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  merged.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  merged.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+  merged.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+  merged.computeBoundingBox();
+  merged.computeBoundingSphere();
+
+  return merged;
+}
+
+function buildBodyPartsForLOD(lod: AzraelLODLevel): SkinnedPartSpec[] {
+  const segMul = lod === 'LOD0' ? 1 : lod === 'LOD1' ? 0.6 : 0.35;
+  const rSeg = (base: number) => Math.max(5, Math.round(base * segMul));
+  const parts: SkinnedPartSpec[] = [];
+
+  // Pelvis & Layered Belt
+  parts.push({
+    geometry: transformGeom(createTaperedCylinder(0.145, 0.135, 0.16, rSeg(16)), [0, 1.03, 0], [0, 0, 0], [1.15, 1, 0.82]),
+    materialIndex: MAT_LEATHER,
+    weights: [{ bone: 'Hips', weight: 1 }],
+  });
+  parts.push({
+    geometry: transformGeom(new THREE.BoxGeometry(0.32, 0.075, 0.22), [0, 1.07, 0.01]),
+    materialIndex: MAT_ARMOR_TRIM,
+    weights: [{ bone: 'Belt_Center', weight: 0.35 }, { bone: 'Hips', weight: 0.65 }],
+  });
+
+  // Muscular Armored Torso (Hips -> Spine -> Spine1 -> Spine2 smooth blend)
+  parts.push({
+    geometry: transformGeom(createTaperedCylinder(0.165, 0.14, 0.22, rSeg(18), 3), [0, 1.21, 0], [0, 0, 0], [1.18, 1, 0.8]),
+    materialIndex: MAT_LEATHER,
+    weights: [],
+    minYBlend: { boneA: 'Spine', boneB: 'Spine1', yMin: 1.11, yMax: 1.32 },
+  });
+  parts.push({
+    geometry: transformGeom(createTaperedCylinder(0.22, 0.165, 0.28, rSeg(20), 4), [0, 1.44, 0.01], [0, 0, 0], [1.18, 1, 0.78]),
+    materialIndex: MAT_ARMOR,
+    weights: [],
+    minYBlend: { boneA: 'Spine1', boneB: 'Spine2', yMin: 1.30, yMax: 1.56 },
+  });
+
+  // Gothic Breastplate Ridge & Provisional Chest Rune Inlay
+  parts.push({
+    geometry: transformGeom(new THREE.BoxGeometry(0.29, 0.24, 0.11), [0, 1.47, 0.085], [-0.08, 0, 0]),
+    materialIndex: MAT_ARMOR,
+    weights: [{ bone: 'Spine2', weight: 0.85 }, { bone: 'ChestPlate', weight: 0.15 }],
+  });
+  parts.push({
+    geometry: transformGeom(new THREE.BoxGeometry(0.30, 0.22, 0.09), [0, 1.48, -0.085], [0.06, 0, 0]),
+    materialIndex: MAT_ARMOR,
+    weights: [{ bone: 'Spine2', weight: 0.85 }, { bone: 'BackPlate', weight: 0.15 }],
+  });
+
+  // Provisional Chest Rune Sigil (Clean geometric diamond-cross placeholder)
+  parts.push({
+    geometry: transformGeom(new THREE.OctahedronGeometry(0.036, lod === 'LOD0' ? 1 : 0), [0, 1.48, 0.142], [0, 0, Math.PI / 4], [0.7, 1.45, 0.25]),
+    materialIndex: MAT_CHEST_RUNE,
+    weights: [{ bone: 'Spine2', weight: 1 }],
+  });
+  if (lod !== 'LOD2') {
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.014, 0.11, 0.012), [0, 1.48, 0.145]),
+      materialIndex: MAT_CHEST_RUNE,
+      weights: [{ bone: 'Spine2', weight: 1 }],
+    });
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.068, 0.012, 0.012), [0, 1.495, 0.145]),
+      materialIndex: MAT_CHEST_RUNE,
+      weights: [{ bone: 'Spine2', weight: 1 }],
+    });
+  }
+
+  // Collar / Scarf Gorget Wrap
+  parts.push({
+    geometry: transformGeom(createTaperedCylinder(0.105, 0.13, 0.10, rSeg(14)), [0, 1.61, 0.01]),
+    materialIndex: MAT_CLOTH,
+    weights: [{ bone: 'Spine2', weight: 0.7 }, { bone: 'Neck', weight: 0.3 }],
+  });
+
+  // Neck
+  parts.push({
+    geometry: transformGeom(createTaperedCylinder(0.052, 0.062, 0.13, rSeg(12)), [0, 1.68, 0.02]),
+    materialIndex: MAT_SKIN,
+    weights: [{ bone: 'Neck', weight: 0.65 }, { bone: 'Head', weight: 0.35 }],
+  });
+
+  // Recognizable Sculpted Human Head & Face (NO default lower-face metal mask!)
+  // Cranium + Cheekbone mass
+  parts.push({
+    geometry: transformGeom(new THREE.SphereGeometry(0.102, rSeg(18), rSeg(14)), [0, 1.825, 0.035], [0, 0, 0], [0.92, 1.12, 1.02]),
+    materialIndex: MAT_SKIN,
+    weights: [{ bone: 'Head', weight: 1 }],
+  });
+  // Angular Jawline & Strong Square Chin
+  parts.push({
+    geometry: transformGeom(new THREE.BoxGeometry(0.095, 0.082, 0.098), [0, 1.765, 0.065], [0.08, 0, 0]),
+    materialIndex: MAT_SKIN,
+    weights: [{ bone: 'Head', weight: 0.85 }, { bone: 'Jaw', weight: 0.15 }],
+  });
+  parts.push({
+    geometry: transformGeom(new THREE.BoxGeometry(0.056, 0.032, 0.044), [0, 1.726, 0.102], [0.12, 0, 0]),
+    materialIndex: MAT_SKIN,
+    weights: [{ bone: 'Head', weight: 0.8 }, { bone: 'Jaw', weight: 0.2 }],
+  });
+  // Cheekbones (L & R)
+  for (const side of [-1, 1]) {
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.036, 0.026, 0.048), [side * 0.046, 1.805, 0.108], [0, side * 0.3, 0]),
+      materialIndex: MAT_SKIN,
+      weights: [{ bone: 'Head', weight: 1 }],
+    });
+  }
+  // Pronounced Brow Ridge
+  parts.push({
+    geometry: transformGeom(new THREE.BoxGeometry(0.108, 0.024, 0.045), [0, 1.855, 0.118], [0.12, 0, 0]),
+    materialIndex: MAT_SKIN,
+    weights: [{ bone: 'Head', weight: 1 }],
+  });
+  // Nose Bridge
+  parts.push({
+    geometry: transformGeom(new THREE.BoxGeometry(0.022, 0.048, 0.032), [0, 1.815, 0.132], [-0.22, 0, 0]),
+    materialIndex: MAT_SKIN,
+    weights: [{ bone: 'Head', weight: 1 }],
+  });
+  // Pale-Blue Luminous Eyes (L & R)
+  parts.push({
+    geometry: transformGeom(new THREE.SphereGeometry(0.0125, rSeg(10), rSeg(8)), [0.033, 1.832, 0.125], [0, 0, 0], [1.15, 0.72, 0.75]),
+    materialIndex: MAT_EYES,
+    weights: [{ bone: 'Eye_L', weight: 0.6 }, { bone: 'Head', weight: 0.4 }],
+  });
+  parts.push({
+    geometry: transformGeom(new THREE.SphereGeometry(0.0125, rSeg(10), rSeg(8)), [-0.033, 1.832, 0.125], [0, 0, 0], [1.15, 0.72, 0.75]),
+    materialIndex: MAT_EYES,
+    weights: [{ bone: 'Eye_R', weight: 0.6 }, { bone: 'Head', weight: 0.4 }],
+  });
+  // Dark Hair Locks framing temples & crown
+  parts.push({
+    geometry: transformGeom(new THREE.SphereGeometry(0.105, rSeg(14), rSeg(10)), [0, 1.845, 0.024], [0, 0, 0], [0.95, 0.96, 1.03]),
+    materialIndex: MAT_HAIR,
+    weights: [{ bone: 'Head', weight: 1 }],
+  });
+
+  // Layered Pauldrons + Arms + Gauntlets + Hands (Left = +1, Right = -1)
+  for (const side of [1, -1] as const) {
+    const suffix = side === 1 ? 'L' : 'R';
+
+    // Gothic Layered Pauldron
+    parts.push({
+      geometry: transformGeom(new THREE.SphereGeometry(0.105, rSeg(14), rSeg(10), 0, Math.PI * 2, 0, Math.PI * 0.62), [side * 0.255, 1.56, 0.0], [0, 0, -side * 0.35], [1.05, 0.9, 1.15]),
+      materialIndex: MAT_ARMOR,
+      weights: [{ bone: `Pauldron_${suffix}`, weight: 0.5 }, { bone: `UpperArm_${suffix}`, weight: 0.5 }],
+    });
+    if (lod !== 'LOD2') {
+      parts.push({
+        geometry: transformGeom(new THREE.BoxGeometry(0.045, 0.065, 0.15), [side * 0.295, 1.60, 0.0], [0, 0, -side * 0.48]),
+        materialIndex: MAT_ARMOR_TRIM,
+        weights: [{ bone: `Pauldron_${suffix}`, weight: 0.5 }, { bone: `UpperArm_${suffix}`, weight: 0.5 }],
+      });
+    }
+
+    // Upper Arm (UpperArm -> ForeArm smooth blend)
+    parts.push({
+      geometry: transformGeom(createTaperedCylinder(0.062, 0.052, 0.30, rSeg(12), 2), [side * 0.265, 1.39, 0.005], [0, 0, side * 0.23]),
+      materialIndex: MAT_LEATHER,
+      weights: [],
+      minYBlend: { boneA: `ForeArm_${suffix}`, boneB: `UpperArm_${suffix}`, yMin: 1.24, yMax: 1.54 },
+    });
+
+    // Forearm + Armored Vambrace / Gauntlet
+    parts.push({
+      geometry: transformGeom(createTaperedCylinder(0.054, 0.044, 0.28, rSeg(12), 2), [side * 0.325, 1.10, 0.025], [-0.1, 0, side * 0.17]),
+      materialIndex: MAT_ARMOR,
+      weights: [{ bone: `ForeArm_${suffix}`, weight: 0.85 }, { bone: `Gauntlet_${suffix}`, weight: 0.15 }],
+    });
+
+    // Articulated Hand & Simplified 3-Segment Grip
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.058, 0.078, 0.065), [side * 0.35, 0.93, 0.045]),
+      materialIndex: MAT_ARMOR_TRIM,
+      weights: [{ bone: `Hand_${suffix}`, weight: 1 }],
+    });
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.028, 0.065, 0.042), [side * 0.35, 0.87, 0.045]),
+      materialIndex: MAT_ARMOR,
+      weights: [{ bone: `Hand_${suffix}`, weight: 0.5 }, { bone: `Grip_${suffix}`, weight: 0.5 }],
+    });
+  }
+
+  // Tassets + Thighs + Knees + Greaves + Sabatons
+  for (const side of [1, -1] as const) {
+    const suffix = side === 1 ? 'L' : 'R';
+
+    // Hip Tasset Plate
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.045, 0.22, 0.18), [side * 0.185, 0.90, 0.01], [0, 0, side * 0.14]),
+      materialIndex: MAT_ARMOR,
+      weights: [{ bone: `Tasset_${suffix}`, weight: 0.6 }, { bone: `Thigh_${suffix}`, weight: 0.4 }],
+    });
+
+    // Thigh (Thigh -> Shin smooth blend)
+    parts.push({
+      geometry: transformGeom(createTaperedCylinder(0.088, 0.068, 0.44, rSeg(14), 3), [side * 0.118, 0.75, 0.0]),
+      materialIndex: MAT_LEATHER,
+      weights: [],
+      minYBlend: { boneA: `Shin_${suffix}`, boneB: `Thigh_${suffix}`, yMin: 0.53, yMax: 0.97 },
+    });
+
+    // Knee Guard
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.095, 0.095, 0.085), [side * 0.12, 0.535, 0.042], [0.1, 0, 0]),
+      materialIndex: MAT_ARMOR_TRIM,
+      weights: [{ bone: `Shin_${suffix}`, weight: 0.7 }, { bone: `Knee_${suffix}`, weight: 0.3 }],
+    });
+
+    // Shin / Greave
+    parts.push({
+      geometry: transformGeom(createTaperedCylinder(0.068, 0.048, 0.42, rSeg(14), 2), [side * 0.122, 0.31, 0.0]),
+      materialIndex: MAT_ARMOR,
+      weights: [{ bone: `Shin_${suffix}`, weight: 0.85 }, { bone: `Greave_${suffix}`, weight: 0.15 }],
+    });
+
+    // Sabaton / Boot
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.092, 0.082, 0.21), [side * 0.125, 0.045, 0.05]),
+      materialIndex: MAT_ARMOR,
+      weights: [{ bone: `Foot_${suffix}`, weight: 0.8 }, { bone: `Toe_${suffix}`, weight: 0.2 }],
+    });
+  }
+
+  // Long Weathered Tattered Cloak (Multi-segment vertical blend across Cloak_Upper -> Cloak_Mid -> Cloak_Lower)
+  const cloakWSeg = lod === 'LOD0' ? 8 : lod === 'LOD1' ? 5 : 2;
+  const cloakHSeg = lod === 'LOD0' ? 12 : lod === 'LOD1' ? 7 : 3;
+  const cloakPlane = new THREE.PlaneGeometry(0.68, 1.38, cloakWSeg, cloakHSeg);
+  // Subtle gothic drape curvature & tattered hem taper
+  const cPos = cloakPlane.attributes.position;
+  for (let i = 0; i < cPos.count; i++) {
+    const x = cPos.getX(i);
+    const y = cPos.getY(i); // +0.69 (top) to -0.69 (bottom)
+    const tDown = THREE.MathUtils.clamp((0.69 - y) / 1.38, 0, 1);
+    const widthScale = 0.72 + tDown * 0.48;
+    const waveZ = -0.14 - tDown * 0.15 - Math.abs(x) * 0.12;
+    const tatter = tDown > 0.82 ? Math.sin(x * 22) * 0.045 * ((tDown - 0.82) / 0.18) : 0;
+    cPos.setXYZ(i, x * widthScale, 0.90 + y - tatter, waveZ + Math.cos(x * 8) * 0.025);
+  }
+  cloakPlane.computeVertexNormals();
+  const cloakGeom = cloakPlane.toNonIndexed();
+  cloakPlane.dispose();
+  // Assign multi-bone vertical cloak weights across Cloak_Lower -> Cloak_Mid -> Cloak_Upper
+  const cloakPart: SkinnedPartSpec = {
+    geometry: cloakGeom,
+    materialIndex: MAT_CLOTH,
+    weights: [],
+    multiYBlend: [
+      { bone: 'Cloak_Lower', y: 0.30 },
+      { bone: 'Cloak_Mid', y: 1.00 },
+      { bone: 'Cloak_Upper', y: 1.54 },
+    ],
+  };
+  parts.push(cloakPart);
+
+  // Coat Front Tattered Panels (L & R)
+  for (const side of [1, -1] as const) {
+    const suffix = side === 1 ? 'L' : 'R';
+    parts.push({
+      geometry: transformGeom(new THREE.BoxGeometry(0.11, 0.44, 0.02), [side * 0.105, 0.78, 0.105], [-0.08, side * 0.12, side * 0.05]),
+      materialIndex: MAT_CLOTH,
+      weights: [{ bone: `Coat_Front_${suffix}`, weight: 0.55 }, { bone: `Thigh_${suffix}`, weight: 0.45 }],
+    });
+  }
+
+  return parts;
+}
+
+function buildHoodMesh(
+  lod: AzraelLODLevel,
+  skeleton: THREE.Skeleton,
+  boneIndexMap: Map<string, number>,
+  materials: THREE.Material[]
+): THREE.SkinnedMesh {
+  const seg = lod === 'LOD0' ? 16 : lod === 'LOD1' ? 10 : 6;
+  const parts: SkinnedPartSpec[] = [
+    // Upper Cowl Dome framing brow without covering jaw/eyes
+    {
+      geometry: transformGeom(new THREE.SphereGeometry(0.145, seg, seg, 0, Math.PI * 2, 0, Math.PI * 0.65), [0, 1.84, 0.015], [-0.22, 0, 0], [1.05, 1.15, 1.22]),
+      materialIndex: MAT_CLOTH,
+      weights: [{ bone: 'Hood_Crown', weight: 0.75 }, { bone: 'Head', weight: 0.25 }],
+    },
+    // Left & Right Cowl Folds
+    {
+      geometry: transformGeom(new THREE.BoxGeometry(0.055, 0.21, 0.17), [0.118, 1.77, 0.02], [0.05, 0.18, -0.14]),
+      materialIndex: MAT_CLOTH,
+      weights: [{ bone: 'Hood_Side_L', weight: 0.65 }, { bone: 'Hood_Crown', weight: 0.35 }],
+    },
+    {
+      geometry: transformGeom(new THREE.BoxGeometry(0.055, 0.21, 0.17), [-0.118, 1.77, 0.02], [0.05, -0.18, 0.14]),
+      materialIndex: MAT_CLOTH,
+      weights: [{ bone: 'Hood_Side_R', weight: 0.65 }, { bone: 'Hood_Crown', weight: 0.35 }],
+    },
+    // Rear Cowl Drape connecting smoothly to shoulders
+    {
+      geometry: transformGeom(createTaperedCylinder(0.135, 0.18, 0.22, seg), [0, 1.69, -0.06], [0.24, 0, 0]),
+      materialIndex: MAT_CLOTH,
+      weights: [{ bone: 'Hood_Back', weight: 0.7 }, { bone: 'Spine2', weight: 0.3 }],
+    },
+  ];
+
+  const geom = mergeSkinnedParts(parts, boneIndexMap);
+  const mesh = new THREE.SkinnedMesh(geom, materials);
+  mesh.name = `Azrael_Hood_${lod}`;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.frustumCulled = false;
+  mesh.bind(skeleton);
+  return mesh;
+}
+
+function buildCeremonialGreatsword(materials: ProceduralRigMaterials): {
+  weaponRoot: THREE.Group;
+  offhandGripSocket: THREE.Object3D;
+} {
+  const weaponRoot = new THREE.Group();
+  weaponRoot.name = 'Azrael_CeremonialGreatsword';
+
+  // Weapon origin = right-hand primary grip center; blade extends along +Y
+  // Primary upper hilt (Right hand grip)
+  const upperHilt = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.019, 0.021, 0.22, 10),
+    materials.leather
+  );
+  upperHilt.position.set(0, -0.02, 0);
+  weaponRoot.add(upperHilt);
+
+  // Lower two-handed grip segment (Left off-hand grips here)
+  const lowerHilt = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.017, 0.020, 0.22, 10),
+    materials.leather
+  );
+  lowerHilt.position.set(0, -0.22, 0);
+  weaponRoot.add(lowerHilt);
+
+  // Pommel
+  const pommel = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.036, 0),
+    materials.armorTrim
+  );
+  pommel.position.set(0, -0.35, 0);
+  pommel.scale.set(1.0, 1.35, 0.85);
+  weaponRoot.add(pommel);
+
+  // Gothic Crossguard
+  const guardBar = new THREE.Mesh(
+    new THREE.BoxGeometry(0.32, 0.036, 0.046),
+    materials.armorTrim
+  );
+  guardBar.position.set(0, 0.11, 0);
+  weaponRoot.add(guardBar);
+
+  for (const side of [-1, 1]) {
+    const quill = new THREE.Mesh(
+      new THREE.ConeGeometry(0.022, 0.095, 5),
+      materials.armorTrim
+    );
+    quill.position.set(side * 0.175, 0.13, 0);
+    quill.rotation.z = -side * 0.9;
+    weaponRoot.add(quill);
+  }
+
+  // Long Ceremonial Broad Blade (~1.28m blade, total length ~1.72m)
+  const bladeCore = new THREE.Mesh(
+    new THREE.BoxGeometry(0.092, 1.08, 0.018),
+    materials.bladeMetal
+  );
+  bladeCore.position.set(0, 0.67, 0);
+  weaponRoot.add(bladeCore);
+
+  // Tapered Greatsword Tip
+  const tipGeom = new THREE.ConeGeometry(0.065, 0.24, 4);
+  tipGeom.rotateY(Math.PI / 4);
+  const tip = new THREE.Mesh(tipGeom, materials.bladeMetal);
+  tip.scale.set(1.0, 1.0, 0.26);
+  tip.position.set(0, 1.33, 0);
+  weaponRoot.add(tip);
+
+  // Provisional Blade Rune Seam along fuller
+  const bladeRune = new THREE.Mesh(
+    new THREE.BoxGeometry(0.016, 0.78, 0.022),
+    materials.bladeRune
+  );
+  bladeRune.position.set(0, 0.56, 0);
+  weaponRoot.add(bladeRune);
+
+  weaponRoot.traverse((child) => {
+    if ((child as THREE.Mesh).isMesh) {
+      child.castShadow = true;
+      child.receiveShadow = true;
+    }
+  });
+
+  // Named Off-Hand Grip Socket (15cm below right hand on two-handed hilt)
+  const offhandGripSocket = new THREE.Object3D();
+  offhandGripSocket.name = 'Weapon_OffhandGrip';
+  offhandGripSocket.position.set(0, -0.15, 0);
+  weaponRoot.add(offhandGripSocket);
+
+  return { weaponRoot, offhandGripSocket };
+}
+
+type PoseOverrides = Record<string, [number, number, number]>;
+
+function makeQuaternionTrack(
+  boneName: string,
+  keyframes: Array<{ t: number; euler: [number, number, number] }>
+): THREE.QuaternionKeyframeTrack {
+  const times: number[] = [];
+  const values: number[] = [];
+  const q = new THREE.Quaternion();
+  const e = new THREE.Euler();
+
+  for (const kf of keyframes) {
+    times.push(kf.t);
+    e.set(kf.euler[0], kf.euler[1], kf.euler[2], 'XYZ');
+    q.setFromEuler(e);
+    values.push(q.x, q.y, q.z, q.w);
+  }
+
+  return new THREE.QuaternionKeyframeTrack(`${boneName}.quaternion`, times, values);
+}
+
+function makeClipFromPoses(
+  name: string,
+  duration: number,
+  keyedPoses: Array<{ t: number; bones: PoseOverrides; hipsOffset?: [number, number, number] }>
+): THREE.AnimationClip {
+  const allBoneNames = new Set<string>();
+  for (const kp of keyedPoses) {
+    Object.keys(kp.bones).forEach((b) => allBoneNames.add(b));
+  }
+
+  const tracks: THREE.KeyframeTrack[] = [];
+
+  for (const boneName of allBoneNames) {
+    const kfs = keyedPoses.map((kp) => ({
+      t: kp.t,
+      euler: kp.bones[boneName] ?? [0, 0, 0],
+    }));
+    tracks.push(makeQuaternionTrack(boneName, kfs));
+  }
+
+  const hasHipsOffset = keyedPoses.some((kp) => kp.hipsOffset);
+  if (hasHipsOffset) {
+    const times: number[] = [];
+    const values: number[] = [];
+    for (const kp of keyedPoses) {
+      times.push(kp.t);
+      const off = kp.hipsOffset ?? [0, 0, 0];
+      values.push(off[0], 1.03 + off[1], off[2]);
+    }
+    tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, values));
+  }
+
+  const clip = new THREE.AnimationClip(name, duration, tracks);
+  clip.optimize();
+  return clip;
+}
+
+function buildProceduralClips(): THREE.AnimationClip[] {
+  const clips: THREE.AnimationClip[] = [];
+
+  // 1. IDLE — Heroic two-handed greatsword guard stance across front center
+  clips.push(
+    makeClipFromPoses('IDLE', 2.6, [
+      {
+        t: 0,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          Spine: [0.04, -0.05, 0],
+          Spine1: [0.04, -0.04, 0],
+          Spine2: [0.03, -0.04, 0],
+          Head: [-0.04, 0.05, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.52, 0.18, 0.15],
+          ForeArm_L: [-0.82, -0.15, -0.25],
+          Thigh_L: [-0.06, 0.08, 0.04],
+          Shin_L: [0.12, 0, 0],
+          Thigh_R: [0.08, -0.08, -0.04],
+          Shin_R: [0.08, 0, 0],
+          Cloak_Upper: [0.06, 0, 0],
+          Cloak_Mid: [0.04, 0, 0],
+        },
+      },
+      {
+        t: 1.3,
+        hipsOffset: [0, 0.015, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          Spine: [0.02, -0.05, 0],
+          Spine1: [0.01, -0.04, 0],
+          Spine2: [0.01, -0.04, 0],
+          Head: [-0.02, 0.05, 0],
+          UpperArm_R: [-0.49, 0.42, 0.32],
+          ForeArm_R: [-1.20, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.48, 0.18, 0.17],
+          ForeArm_L: [-0.85, -0.15, -0.25],
+          Thigh_L: [-0.04, 0.08, 0.04],
+          Shin_L: [0.09, 0, 0],
+          Thigh_R: [0.06, -0.08, -0.04],
+          Shin_R: [0.06, 0, 0],
+          Cloak_Upper: [0.09, 0, 0.02],
+          Cloak_Mid: [0.08, 0, 0.03],
+        },
+      },
+      {
+        t: 2.6,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          Spine: [0.04, -0.05, 0],
+          Spine1: [0.04, -0.04, 0],
+          Spine2: [0.03, -0.04, 0],
+          Head: [-0.04, 0.05, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.52, 0.18, 0.15],
+          ForeArm_L: [-0.82, -0.15, -0.25],
+          Thigh_L: [-0.06, 0.08, 0.04],
+          Shin_L: [0.12, 0, 0],
+          Thigh_R: [0.08, -0.08, -0.04],
+          Shin_R: [0.08, 0, 0],
+          Cloak_Upper: [0.06, 0, 0],
+          Cloak_Mid: [0.04, 0, 0],
+        },
+      },
+    ])
+  );
+
+  // 2. WALK — Deliberate heavy armored stride
+  clips.push(
+    makeClipFromPoses('WALK', 1.2, [
+      {
+        t: 0,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0.03, -0.06, 0],
+          Spine2: [0.06, 0.08, 0],
+          Thigh_L: [-0.38, 0, 0],
+          Shin_L: [0.22, 0, 0],
+          Thigh_R: [0.32, 0, 0],
+          Shin_R: [0.35, 0, 0],
+          UpperArm_R: [-0.50, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.50, 0.18, 0.16],
+          ForeArm_L: [-0.82, -0.15, -0.24],
+          Cloak_Upper: [0.14, 0, 0],
+        },
+      },
+      {
+        t: 0.3,
+        hipsOffset: [0, 0.025, 0],
+        bones: {
+          Hips: [0.02, 0.0, 0],
+          Spine2: [0.05, 0.0, 0],
+          Thigh_L: [-0.05, 0, 0],
+          Shin_L: [0.08, 0, 0],
+          Thigh_R: [-0.15, 0, 0],
+          Shin_R: [0.65, 0, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.20, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.52, 0.18, 0.16],
+          ForeArm_L: [-0.84, -0.15, -0.24],
+          Cloak_Upper: [0.18, 0, 0.03],
+        },
+      },
+      {
+        t: 0.6,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0.03, 0.06, 0],
+          Spine2: [0.06, -0.08, 0],
+          Thigh_L: [0.32, 0, 0],
+          Shin_L: [0.35, 0, 0],
+          Thigh_R: [-0.38, 0, 0],
+          Shin_R: [0.22, 0, 0],
+          UpperArm_R: [-0.49, 0.42, 0.34],
+          ForeArm_R: [-1.16, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.49, 0.18, 0.16],
+          ForeArm_L: [-0.80, -0.15, -0.24],
+          Cloak_Upper: [0.14, 0, -0.02],
+        },
+      },
+      {
+        t: 0.9,
+        hipsOffset: [0, 0.025, 0],
+        bones: {
+          Hips: [0.02, 0.0, 0],
+          Spine2: [0.05, 0.0, 0],
+          Thigh_L: [-0.15, 0, 0],
+          Shin_L: [0.65, 0, 0],
+          Thigh_R: [-0.05, 0, 0],
+          Shin_R: [0.08, 0, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.20, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.52, 0.18, 0.16],
+          ForeArm_L: [-0.84, -0.15, -0.24],
+          Cloak_Upper: [0.18, 0, -0.03],
+        },
+      },
+      {
+        t: 1.2,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0.03, -0.06, 0],
+          Spine2: [0.06, 0.08, 0],
+          Thigh_L: [-0.38, 0, 0],
+          Shin_L: [0.22, 0, 0],
+          Thigh_R: [0.32, 0, 0],
+          Shin_R: [0.35, 0, 0],
+          UpperArm_R: [-0.50, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+          UpperArm_L: [-0.50, 0.18, 0.16],
+          ForeArm_L: [-0.82, -0.15, -0.24],
+          Cloak_Upper: [0.14, 0, 0],
+        },
+      },
+    ])
+  );
+
+  // 3. RUN — Forward combat sprint with blade trailed right
+  clips.push(
+    makeClipFromPoses('RUN', 0.72, [
+      {
+        t: 0,
+        hipsOffset: [0, -0.03, 0],
+        bones: {
+          Hips: [0.16, -0.12, 0],
+          Spine: [0.12, 0.05, 0],
+          Spine2: [0.14, 0.12, 0],
+          Head: [-0.22, -0.05, 0],
+          Thigh_L: [-0.68, 0, 0],
+          Shin_L: [0.42, 0, 0],
+          Thigh_R: [0.55, 0, 0],
+          Shin_R: [0.65, 0, 0],
+          UpperArm_R: [0.28, 0.12, -0.32],
+          ForeArm_R: [-0.55, 0, 0],
+          UpperArm_L: [-0.45, 0.15, 0.2],
+          ForeArm_L: [-1.15, 0, 0],
+          Cloak_Upper: [0.38, 0, 0],
+          Cloak_Mid: [0.24, 0, 0],
+        },
+      },
+      {
+        t: 0.36,
+        hipsOffset: [0, 0.02, 0],
+        bones: {
+          Hips: [0.16, 0.12, 0],
+          Spine: [0.12, -0.05, 0],
+          Spine2: [0.14, -0.12, 0],
+          Head: [-0.22, 0.05, 0],
+          Thigh_L: [0.55, 0, 0],
+          Shin_L: [0.65, 0, 0],
+          Thigh_R: [-0.68, 0, 0],
+          Shin_R: [0.42, 0, 0],
+          UpperArm_R: [0.34, 0.12, -0.34],
+          ForeArm_R: [-0.58, 0, 0],
+          UpperArm_L: [0.38, 0.12, 0.24],
+          ForeArm_L: [-1.05, 0, 0],
+          Cloak_Upper: [0.45, 0, 0.04],
+          Cloak_Mid: [0.30, 0, -0.03],
+        },
+      },
+      {
+        t: 0.72,
+        hipsOffset: [0, -0.03, 0],
+        bones: {
+          Hips: [0.16, -0.12, 0],
+          Spine: [0.12, 0.05, 0],
+          Spine2: [0.14, 0.12, 0],
+          Head: [-0.22, -0.05, 0],
+          Thigh_L: [-0.68, 0, 0],
+          Shin_L: [0.42, 0, 0],
+          Thigh_R: [0.55, 0, 0],
+          Shin_R: [0.65, 0, 0],
+          UpperArm_R: [0.28, 0.12, -0.32],
+          ForeArm_R: [-0.55, 0, 0],
+          UpperArm_L: [-0.45, 0.15, 0.2],
+          ForeArm_L: [-1.15, 0, 0],
+          Cloak_Upper: [0.38, 0, 0],
+          Cloak_Mid: [0.24, 0, 0],
+        },
+      },
+    ])
+  );
+
+  // 4. LIGHT_ATTACK — Crisp two-handed diagonal slash across front
+  clips.push(
+    makeClipFromPoses('LIGHT_ATTACK', 0.85, [
+      {
+        t: 0,
+        hipsOffset: [0, -0.02, 0],
+        bones: {
+          Hips: [0.05, -0.18, 0],
+          Spine2: [0.06, -0.14, 0],
+          UpperArm_R: [-0.62, 0.28, 0.28],
+          ForeArm_R: [-1.12, 0.22, 0.42],
+          Hand_R: [0.15, 0.1, 0.30],
+          Thigh_L: [-0.15, 0, 0],
+          Thigh_R: [0.18, 0, 0],
+        },
+      },
+      {
+        t: 0.34,
+        hipsOffset: [0, -0.05, 0.12],
+        bones: {
+          Hips: [0.14, 0.22, 0],
+          Spine2: [0.16, 0.24, 0],
+          Head: [-0.12, -0.18, 0],
+          UpperArm_R: [-0.66, 0.46, 0.44],
+          ForeArm_R: [-1.05, 0.25, 0.42],
+          Hand_R: [0.30, 0.18, 0.35],
+          Thigh_L: [-0.42, 0, 0],
+          Shin_L: [0.45, 0, 0],
+          Thigh_R: [0.28, 0, 0],
+          Cloak_Upper: [0.28, -0.18, 0],
+        },
+      },
+      {
+        t: 0.85,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          Spine2: [0.03, -0.04, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+        },
+      },
+    ])
+  );
+
+  // 5. HEAVY_ATTACK — Overhead two-handed execution cleave
+  clips.push(
+    makeClipFromPoses('HEAVY_ATTACK', 1.35, [
+      {
+        t: 0,
+        hipsOffset: [0, 0.02, -0.05],
+        bones: {
+          Hips: [-0.08, 0.05, 0],
+          Spine: [-0.14, 0, 0],
+          Spine2: [-0.20, 0, 0],
+          Head: [0.15, 0, 0],
+          UpperArm_R: [-2.18, 0.25, 0.34],
+          ForeArm_R: [-0.95, 0.1, 0.32],
+          Hand_R: [0.15, 0, 0.25],
+          UpperArm_L: [-2.15, -0.15, -0.15],
+          ForeArm_L: [-0.85, 0, -0.2],
+          Cloak_Upper: [-0.05, 0, 0],
+        },
+      },
+      {
+        t: 0.45,
+        hipsOffset: [0, 0.05, -0.08],
+        bones: {
+          Hips: [-0.12, 0.05, 0],
+          Spine: [-0.18, 0, 0],
+          Spine2: [-0.26, 0, 0],
+          UpperArm_R: [-2.42, 0.28, 0.38],
+          ForeArm_R: [-0.82, 0.1, 0.28],
+          Hand_R: [0.18, 0, 0.25],
+          UpperArm_L: [-2.35, -0.15, -0.15],
+          ForeArm_L: [-0.75, 0, -0.15],
+        },
+      },
+      {
+        t: 0.72,
+        hipsOffset: [0, -0.14, 0.18],
+        bones: {
+          Hips: [0.22, 0.05, 0],
+          Spine: [0.24, 0, 0],
+          Spine2: [0.28, 0, 0],
+          Head: [-0.24, 0, 0],
+          UpperArm_R: [-0.48, 0.42, 0.36],
+          ForeArm_R: [-1.02, 0.2, 0.42],
+          Hand_R: [0.55, 0.1, 0.28],
+          UpperArm_L: [-0.45, 0.15, 0.15],
+          ForeArm_L: [-0.75, 0, 0],
+          Thigh_L: [-0.55, 0, 0],
+          Shin_L: [0.65, 0, 0],
+          Thigh_R: [0.35, 0, 0],
+          Cloak_Upper: [0.42, 0, 0],
+        },
+      },
+      {
+        t: 1.35,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          Spine2: [0.03, -0.04, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+        },
+      },
+    ])
+  );
+
+  // 6. BLOCK — Angled greatsword ward across torso
+  clips.push(
+    makeClipFromPoses('BLOCK', 1.6, [
+      {
+        t: 0,
+        hipsOffset: [0, -0.06, 0],
+        bones: {
+          Hips: [0.08, -0.16, 0],
+          Spine2: [0.08, 0.12, 0],
+          UpperArm_R: [-0.88, 0.45, 0.38],
+          ForeArm_R: [-1.15, 0.22, 0.42],
+          Hand_R: [0.15, 0.22, 0.72],
+          UpperArm_L: [-0.85, 0.12, 0.18],
+          ForeArm_L: [-0.95, -0.2, -0.2],
+          Thigh_L: [-0.25, 0, 0.08],
+          Shin_L: [0.35, 0, 0],
+          Thigh_R: [0.18, 0, -0.08],
+          Shin_R: [0.22, 0, 0],
+        },
+      },
+      {
+        t: 0.8,
+        hipsOffset: [0, -0.05, 0],
+        bones: {
+          Hips: [0.08, -0.16, 0],
+          Spine2: [0.06, 0.12, 0],
+          UpperArm_R: [-0.92, 0.45, 0.38],
+          ForeArm_R: [-1.12, 0.22, 0.42],
+          Hand_R: [0.15, 0.22, 0.72],
+          UpperArm_L: [-0.88, 0.12, 0.18],
+          ForeArm_L: [-0.92, -0.2, -0.2],
+          Thigh_L: [-0.25, 0, 0.08],
+          Shin_L: [0.35, 0, 0],
+          Thigh_R: [0.18, 0, -0.08],
+          Shin_R: [0.22, 0, 0],
+        },
+      },
+      {
+        t: 1.6,
+        hipsOffset: [0, -0.06, 0],
+        bones: {
+          Hips: [0.08, -0.16, 0],
+          Spine2: [0.08, 0.12, 0],
+          UpperArm_R: [-0.88, 0.45, 0.38],
+          ForeArm_R: [-1.15, 0.22, 0.42],
+          Hand_R: [0.15, 0.22, 0.72],
+          UpperArm_L: [-0.85, 0.12, 0.18],
+          ForeArm_L: [-0.95, -0.2, -0.2],
+          Thigh_L: [-0.25, 0, 0.08],
+          Shin_L: [0.35, 0, 0],
+          Thigh_R: [0.18, 0, -0.08],
+          Shin_R: [0.22, 0, 0],
+        },
+      },
+    ])
+  );
+
+  // 7. PARRY — Sharp upward two-handed deflection sweep
+  clips.push(
+    makeClipFromPoses('PARRY', 0.65, [
+      {
+        t: 0,
+        hipsOffset: [0, -0.05, 0],
+        bones: {
+          Hips: [0.06, -0.15, 0],
+          UpperArm_R: [-0.82, 0.40, 0.34],
+          ForeArm_R: [-1.12, 0.2, 0.40],
+          Hand_R: [0.12, 0.2, 0.65],
+        },
+      },
+      {
+        t: 0.24,
+        hipsOffset: [0, 0.02, 0.06],
+        bones: {
+          Hips: [-0.04, 0.24, 0],
+          Spine2: [-0.08, 0.24, 0],
+          UpperArm_R: [-1.42, 0.25, 0.35],
+          ForeArm_R: [-0.88, 0.15, 0.25],
+          Hand_R: [0.25, -0.1, 0.2],
+          UpperArm_L: [-1.15, 0.2, 0.25],
+          Cloak_Upper: [0.22, -0.15, 0],
+        },
+      },
+      {
+        t: 0.65,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+        },
+      },
+    ])
+  );
+
+  // 8. DODGE — Low lateral dash crouch
+  clips.push(
+    makeClipFromPoses('DODGE', 0.65, [
+      {
+        t: 0,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+        },
+      },
+      {
+        t: 0.22,
+        hipsOffset: [0, -0.24, -0.08],
+        bones: {
+          Hips: [0.34, -0.28, -0.12],
+          Spine: [0.22, 0, 0],
+          Spine2: [0.24, 0.18, 0],
+          Head: [-0.32, 0, 0],
+          Thigh_L: [-0.85, 0, 0.14],
+          Shin_L: [1.12, 0, 0],
+          Thigh_R: [0.25, 0, -0.15],
+          Shin_R: [0.68, 0, 0],
+          UpperArm_R: [0.42, 0.2, -0.45],
+          ForeArm_R: [-0.45, 0, 0],
+          UpperArm_L: [-0.65, 0.2, 0.35],
+          ForeArm_L: [-1.1, 0, 0],
+          Cloak_Upper: [0.55, 0.18, 0],
+        },
+      },
+      {
+        t: 0.65,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          UpperArm_R: [-0.52, -0.18, -0.22],
+          ForeArm_R: [-0.72, 0.25, 0.24],
+        },
+      },
+    ])
+  );
+
+  // 9. HIT_REACTION — Heavy stagger backward
+  clips.push(
+    makeClipFromPoses('HIT_REACTION', 0.7, [
+      {
+        t: 0,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+        },
+      },
+      {
+        t: 0.18,
+        hipsOffset: [0, -0.06, -0.14],
+        bones: {
+          Hips: [-0.14, -0.16, 0.06],
+          Spine: [-0.20, -0.1, 0],
+          Spine2: [-0.25, -0.12, 0],
+          Head: [-0.32, 0.14, 0],
+          UpperArm_R: [-0.25, -0.35, -0.48],
+          ForeArm_R: [-0.45, 0, 0],
+          UpperArm_L: [-0.55, 0.35, 0.55],
+          ForeArm_L: [-0.85, 0, 0],
+          Cloak_Upper: [-0.08, 0, 0],
+        },
+      },
+      {
+        t: 0.7,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          UpperArm_R: [-0.52, -0.18, -0.22],
+          ForeArm_R: [-0.72, 0.25, 0.24],
+        },
+      },
+    ])
+  );
+
+  // 10. DEATH — Kneel collapse to ground
+  clips.push(
+    makeClipFromPoses('DEATH', 1.6, [
+      {
+        t: 0,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+        },
+      },
+      {
+        t: 0.65,
+        hipsOffset: [0, -0.45, -0.05],
+        bones: {
+          Hips: [0.22, 0, 0],
+          Spine2: [0.32, 0, 0],
+          Head: [0.35, 0, 0],
+          Thigh_L: [-1.05, 0, 0],
+          Shin_L: [1.65, 0, 0],
+          Thigh_R: [-0.65, 0, 0],
+          Shin_R: [1.35, 0, 0],
+          UpperArm_R: [-0.15, 0, -0.35],
+          UpperArm_L: [-0.25, 0, 0.35],
+        },
+      },
+      {
+        t: 1.6,
+        hipsOffset: [0, -0.84, 0.15],
+        bones: {
+          Hips: [1.35, 0.1, 0.12],
+          Spine: [0.18, 0, 0],
+          Spine2: [0.16, 0, 0],
+          Head: [0.22, 0.25, 0],
+          Thigh_L: [-0.22, 0, 0.1],
+          Shin_L: [0.35, 0, 0],
+          Thigh_R: [-0.18, 0, -0.1],
+          Shin_R: [0.22, 0, 0],
+          UpperArm_R: [-0.35, 0.2, -0.65],
+          ForeArm_R: [-0.3, 0, 0],
+          UpperArm_L: [-0.45, -0.2, 0.72],
+          ForeArm_L: [-0.35, 0, 0],
+          Cloak_Upper: [0.22, 0, 0],
+        },
+      },
+    ])
+  );
+
+  // 11. AWAKEN — Sovereign power surge opening chest rune
+  clips.push(
+    makeClipFromPoses('AWAKEN', 1.8, [
+      {
+        t: 0,
+        hipsOffset: [0, -0.08, 0],
+        bones: {
+          Hips: [0.12, 0, 0],
+          Spine2: [0.22, 0, 0],
+          Head: [0.25, 0, 0],
+          UpperArm_R: [-0.55, 0.35, -0.1],
+          UpperArm_L: [-0.55, -0.35, 0.1],
+          Thigh_L: [-0.18, 0, 0.08],
+          Shin_L: [0.28, 0, 0],
+          Thigh_R: [-0.18, 0, -0.08],
+          Shin_R: [0.28, 0, 0],
+        },
+      },
+      {
+        t: 0.75,
+        hipsOffset: [0, 0.06, 0],
+        bones: {
+          Hips: [-0.10, 0, 0],
+          Spine: [-0.16, 0, 0],
+          Spine2: [-0.24, 0, 0],
+          Head: [-0.32, 0, 0],
+          UpperArm_R: [-0.35, -0.3, -1.05],
+          ForeArm_R: [-0.35, 0, -0.2],
+          UpperArm_L: [-0.35, 0.3, 1.05],
+          ForeArm_L: [-0.35, 0, 0.2],
+          Cloak_Upper: [0.55, 0, 0],
+          Cloak_Mid: [0.35, 0, 0],
+        },
+      },
+      {
+        t: 1.8,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          Spine2: [0.03, -0.04, 0],
+          UpperArm_R: [-0.52, -0.18, -0.22],
+          ForeArm_R: [-0.72, 0.25, 0.24],
+        },
+      },
+    ])
+  );
+
+  // 12. FINISHER — Two-handed spinning execution lunge
+  clips.push(
+    makeClipFromPoses('FINISHER', 1.45, [
+      {
+        t: 0,
+        hipsOffset: [0, -0.05, -0.1],
+        bones: {
+          Hips: [0.06, -0.38, 0],
+          Spine2: [0.1, -0.28, 0],
+          UpperArm_R: [-0.78, 0.28, 0.22],
+          ForeArm_R: [-1.05, 0.2, 0.35],
+          Hand_R: [0.12, 0.12, 0.35],
+        },
+      },
+      {
+        t: 0.52,
+        hipsOffset: [0, -0.12, 0.26],
+        bones: {
+          Hips: [0.24, 0.18, 0],
+          Spine2: [0.24, 0.20, 0],
+          Head: [-0.25, -0.16, 0],
+          UpperArm_R: [-0.92, 0.48, 0.44],
+          ForeArm_R: [-0.72, 0.2, 0.32],
+          Hand_R: [0.55, 0.15, 0.28],
+          Thigh_L: [-0.62, 0, 0],
+          Shin_L: [0.68, 0, 0],
+          Thigh_R: [0.42, 0, 0],
+          Cloak_Upper: [0.48, 0, 0],
+        },
+      },
+      {
+        t: 1.45,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, 0.14, 0],
+          UpperArm_R: [-0.52, 0.42, 0.34],
+          ForeArm_R: [-1.18, 0.24, 0.46],
+          Hand_R: [0.10, 0.12, 0.38],
+        },
+      },
+    ])
+  );
+
+  // 13. CINEMATIC_STANCE — Stoic sword-planted vigil pose
+  clips.push(
+    makeClipFromPoses('CINEMATIC_STANCE', 3.0, [
+      {
+        t: 0,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, -0.05, 0],
+          Spine2: [-0.02, 0.05, 0],
+          Head: [0.08, -0.06, 0],
+          UpperArm_R: [-0.32, 0.1, -0.12],
+          ForeArm_R: [-0.42, 0, 0.1],
+          Hand_R: [0.75, 0, 0],
+          UpperArm_L: [0.08, 0, 0.16],
+          ForeArm_L: [-0.22, 0, 0],
+          Cloak_Upper: [0.12, 0, 0.03],
+        },
+      },
+      {
+        t: 1.5,
+        hipsOffset: [0, 0.012, 0],
+        bones: {
+          Hips: [0, -0.05, 0],
+          Spine2: [-0.04, 0.05, 0],
+          Head: [0.06, -0.04, 0],
+          UpperArm_R: [-0.32, 0.1, -0.12],
+          ForeArm_R: [-0.42, 0, 0.1],
+          Hand_R: [0.75, 0, 0],
+          UpperArm_L: [0.08, 0, 0.18],
+          ForeArm_L: [-0.25, 0, 0],
+          Cloak_Upper: [0.16, 0, -0.03],
+        },
+      },
+      {
+        t: 3.0,
+        hipsOffset: [0, 0, 0],
+        bones: {
+          Hips: [0, -0.05, 0],
+          Spine2: [-0.02, 0.05, 0],
+          Head: [0.08, -0.06, 0],
+          UpperArm_R: [-0.32, 0.1, -0.12],
+          ForeArm_R: [-0.42, 0, 0.1],
+          Hand_R: [0.75, 0, 0],
+          UpperArm_L: [0.08, 0, 0.16],
+          ForeArm_L: [-0.22, 0, 0],
+          Cloak_Upper: [0.12, 0, 0.03],
+        },
+      },
+    ])
+  );
+
+  return clips;
+}
+
+export function createProceduralAzraelAsset(): LoadedAzraelAsset {
+  const root = new THREE.Group();
+  root.name = 'Azrael_Procedural_Root';
+
+  const materials = createProceduralMaterials();
+  const materialArray: THREE.Material[] = [
+    materials.armor,
+    materials.armorTrim,
+    materials.leather,
+    materials.cloth,
+    materials.skin,
+    materials.hair,
+    materials.eyes,
+    materials.chestRune,
+  ];
+
+  const { rootBone, bones, boneIndexMap, boneMap, skeleton } = buildCanonicalSkeleton();
+  root.add(rootBone);
+  root.updateMatrixWorld(true);
+
+  const lodGroups: Record<AzraelLODLevel, THREE.Object3D[]> = {
+    LOD0: [],
+    LOD1: [],
+    LOD2: [],
+  };
+  const meshes: THREE.Mesh[] = [];
+  const hoodGroup = new THREE.Group();
+  hoodGroup.name = 'Azrael_Hood_Group';
+  root.add(hoodGroup);
+
+  const lods: AzraelLODLevel[] = ['LOD0', 'LOD1', 'LOD2'];
+  for (const lod of lods) {
+    const bodyParts = buildBodyPartsForLOD(lod);
+    const bodyGeom = mergeSkinnedParts(bodyParts, boneIndexMap);
+    const bodyMesh = new THREE.SkinnedMesh(bodyGeom, materialArray);
+    bodyMesh.name = `Azrael_Body_${lod}`;
+    bodyMesh.castShadow = true;
+    bodyMesh.receiveShadow = true;
+    bodyMesh.frustumCulled = false;
+    bodyMesh.bind(skeleton);
+    bodyMesh.visible = lod === 'LOD0';
+    root.add(bodyMesh);
+    lodGroups[lod].push(bodyMesh);
+    meshes.push(bodyMesh);
+
+    const hoodMesh = buildHoodMesh(lod, skeleton, boneIndexMap, materialArray);
+    hoodMesh.visible = lod === 'LOD0';
+    hoodGroup.add(hoodMesh);
+    lodGroups[lod].push(hoodMesh);
+    meshes.push(hoodMesh);
+  }
+
+  // Named Sockets attached directly to skeleton bones
+  const sockets: Partial<Record<AzraelSocketName, THREE.Object3D>> = {};
+
+  const handRBone = boneMap.get('Hand_R')!;
+  const weaponRSocket = new THREE.Object3D();
+  weaponRSocket.name = 'Weapon_R';
+  weaponRSocket.position.set(0, -0.055, 0.025);
+  weaponRSocket.rotation.set(Math.PI * 0.42, 0.12, -0.1);
+  handRBone.add(weaponRSocket);
+  sockets.Weapon_R = weaponRSocket;
+
+  const spine2Bone = boneMap.get('Spine2')!;
+  const weaponBackSocket = new THREE.Object3D();
+  weaponBackSocket.name = 'Weapon_Back';
+  weaponBackSocket.position.set(-0.08, -0.05, -0.16);
+  weaponBackSocket.rotation.set(0.12, Math.PI, -0.62);
+  spine2Bone.add(weaponBackSocket);
+  sockets.Weapon_Back = weaponBackSocket;
+
+  const vfxChestSocket = new THREE.Object3D();
+  vfxChestSocket.name = 'VFX_Chest';
+  vfxChestSocket.position.set(0, 0.0, 0.15);
+  spine2Bone.add(vfxChestSocket);
+  sockets.VFX_Chest = vfxChestSocket;
+
+  const hipsBone = boneMap.get('Hips')!;
+  const vfxAuraSocket = new THREE.Object3D();
+  vfxAuraSocket.name = 'VFX_Aura';
+  vfxAuraSocket.position.set(0, -0.1, 0);
+  hipsBone.add(vfxAuraSocket);
+  sockets.VFX_Aura = vfxAuraSocket;
+
+  // Greatsword & OffhandGrip socket
+  const { weaponRoot, offhandGripSocket } = buildCeremonialGreatsword(materials);
+  weaponRSocket.add(weaponRoot);
+  sockets.Weapon_OffhandGrip = offhandGripSocket;
+
+  weaponRoot.traverse((child) => {
+    if ((child as THREE.Mesh).isMesh) {
+      meshes.push(child as THREE.Mesh);
+    }
+  });
+
+  const clips = buildProceduralClips();
+
+  const dispose = () => {
+    const disposedGeoms = new Set<THREE.BufferGeometry>();
+    const disposedMats = new Set<THREE.Material>();
+    root.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (m.geometry && !disposedGeoms.has(m.geometry)) {
+        disposedGeoms.add(m.geometry);
+        m.geometry.dispose();
+      }
+      if (m.material) {
+        const mats = Array.isArray(m.material) ? m.material : [m.material];
+        mats.forEach((mat) => {
+          if (!disposedMats.has(mat)) {
+            disposedMats.add(mat);
+            mat.dispose();
+          }
+        });
+      }
+    });
+    skeleton.dispose();
+  };
+
+  return {
+    root,
+    clips,
+    sockets,
+    weaponRoot,
+    weaponOffhandGrip: offhandGripSocket,
+    skeletons: [skeleton],
+    bones,
+    lodGroups,
+    meshes,
+    chestRuneMaterials: [materials.chestRune],
+    eyeMaterials: [materials.eyes],
+    bladeEmissiveMaterials: [materials.bladeRune],
+    armorAccentMaterials: [materials.armor, materials.armorTrim],
+    hoodGroup,
+    hoodBones: {
+      crown: boneMap.get('Hood_Crown'),
+      back: boneMap.get('Hood_Back'),
+      sideL: boneMap.get('Hood_Side_L'),
+      sideR: boneMap.get('Hood_Side_R'),
+    },
+    cloakBones: [
+      boneMap.get('Cloak_Upper'),
+      boneMap.get('Cloak_Mid'),
+      boneMap.get('Cloak_Lower'),
+    ].filter((b): b is THREE.Bone => Boolean(b)),
+    sourceLabel: 'Procedural Skinned Rig (72 Bones)',
+    sourceType: 'procedural_skinned',
+    dispose,
+  };
+}

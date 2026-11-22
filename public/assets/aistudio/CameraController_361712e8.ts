@@ -1,0 +1,172 @@
+/**
+ * The Seven Hellgates - Third-Person Cinematic Camera Controller
+ * Smooth orbital tracking, pitch/yaw limits, lock-on targeting, and screen shake.
+ */
+
+import * as THREE from 'three';
+
+export class CameraController {
+  public camera: THREE.PerspectiveCamera;
+  public yaw: number = 0;
+  public pitch: number = 0.25; // slight downward angle
+  public distance: number = 4.8;
+  public heightOffset: number = 1.45;
+  
+  public baseFov: number = 60;
+  public targetFov: number = 60;
+  
+  private shakeIntensity: number = 0;
+  private shakeDecay: number = 6.0;
+  private currentLookTarget = new THREE.Vector3();
+  private currentCamPos = new THREE.Vector3();
+
+  public lockTarget: THREE.Vector3 | null = null;
+  public isCutsceneActive: boolean = false;
+
+  constructor(fov: number = 60, aspect: number = 16 / 9) {
+    this.baseFov = fov;
+    this.targetFov = fov;
+    this.camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 560);
+    this.camera.position.set(0, 3, 6);
+  }
+
+  public snapTo(playerPos: THREE.Vector3, yaw?: number) {
+    if (yaw !== undefined) {
+      this.yaw = yaw;
+    }
+    this.lockTarget = null;
+    this.currentLookTarget.set(playerPos.x, playerPos.y + this.heightOffset, playerPos.z);
+    const cx = Math.sin(this.yaw) * Math.cos(this.pitch) * this.distance;
+    const cy = Math.sin(this.pitch) * this.distance;
+    const cz = Math.cos(this.yaw) * Math.cos(this.pitch) * this.distance;
+    this.currentCamPos.set(
+      this.currentLookTarget.x - cx,
+      this.currentLookTarget.y + cy,
+      this.currentLookTarget.z - cz
+    );
+    this.camera.position.copy(this.currentCamPos);
+    this.camera.lookAt(this.currentLookTarget);
+  }
+
+  public addScreenShake(amount: number) {
+    this.shakeIntensity = Math.min(1.2, this.shakeIntensity + amount);
+  }
+
+  public setAspect(aspect: number) {
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+  }
+
+  public setCutsceneFrame(
+    pos: THREE.Vector3,
+    lookAt: THREE.Vector3,
+    fov: number,
+    rollRad: number = 0
+  ) {
+    this.isCutsceneActive = true;
+    this.currentCamPos.copy(pos);
+    this.currentLookTarget.copy(lookAt);
+
+    if (Math.abs(this.camera.fov - fov) > 0.05) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+
+    this.camera.position.copy(pos);
+    if (this.shakeIntensity > 0.001) {
+      const sx = (Math.random() - 0.5) * this.shakeIntensity * 0.35;
+      const sy = (Math.random() - 0.5) * this.shakeIntensity * 0.35;
+      const sz = (Math.random() - 0.5) * this.shakeIntensity * 0.35;
+      this.camera.position.add(new THREE.Vector3(sx, sy, sz));
+    }
+
+    this.camera.up.set(0, 1, 0);
+    this.camera.lookAt(lookAt);
+    if (Math.abs(rollRad) > 0.0001) {
+      this.camera.rotateZ(rollRad);
+    }
+  }
+
+  public releaseCutscene(playerPos?: THREE.Vector3, bossPos?: THREE.Vector3) {
+    this.isCutsceneActive = false;
+    this.camera.up.set(0, 1, 0);
+    this.targetFov = this.baseFov;
+    if (playerPos && bossPos) {
+      const toBoss = new THREE.Vector3().subVectors(bossPos, playerPos);
+      this.yaw = Math.atan2(toBoss.x, toBoss.z);
+      this.pitch = 0.25;
+    }
+  }
+
+  public update(
+    delta: number,
+    playerPos: THREE.Vector3,
+    lookDeltaX: number,
+    lookDeltaY: number,
+    comboCount: number = 0,
+    isInCombat: boolean = false,
+    getGroundHeightAt?: (x: number, z: number) => number
+  ) {
+    if (this.shakeIntensity > 0.001) {
+      this.shakeIntensity = Math.max(0, this.shakeIntensity - this.shakeDecay * delta);
+    }
+
+    if (this.isCutsceneActive) {
+      return;
+    }
+
+    // Dynamic combat FOV scaling: expands field of view during intense action and combos
+    this.targetFov = this.baseFov + Math.min(10, comboCount * 0.75) + (isInCombat ? 3.5 : 0);
+    if (Math.abs(this.camera.fov - this.targetFov) > 0.05) {
+      this.camera.fov = THREE.MathUtils.damp(this.camera.fov, this.targetFov, 4.5, delta);
+      this.camera.updateProjectionMatrix();
+    }
+
+    // 1. Process mouse/touch look
+    if (!this.lockTarget) {
+      this.yaw -= lookDeltaX * 1.5;
+      this.pitch = Math.max(-0.25, Math.min(1.1, this.pitch + lookDeltaY * 1.5));
+    } else {
+      // Lock-on mode: orient yaw directly towards target
+      const toLock = new THREE.Vector3().subVectors(this.lockTarget, playerPos);
+      const desiredYaw = Math.atan2(toLock.x, toLock.z);
+      this.yaw = THREE.MathUtils.damp(this.yaw, desiredYaw, 6, delta);
+      this.pitch = THREE.MathUtils.damp(this.pitch, 0.28, 4, delta);
+    }
+
+    // 2. Compute camera spherical position relative to player
+    const targetY = playerPos.y + this.heightOffset;
+    const desiredTarget = new THREE.Vector3(playerPos.x, targetY, playerPos.z);
+    this.currentLookTarget.lerp(desiredTarget, Math.min(1, delta * 12));
+
+    const cx = Math.sin(this.yaw) * Math.cos(this.pitch) * this.distance;
+    const cy = Math.sin(this.pitch) * this.distance;
+    const cz = Math.cos(this.yaw) * Math.cos(this.pitch) * this.distance;
+
+    const desiredCamPos = new THREE.Vector3(
+      this.currentLookTarget.x - cx,
+      this.currentLookTarget.y + cy,
+      this.currentLookTarget.z - cz
+    );
+
+    // Keep camera smoothly above terrain/crypt/courtyard floor at desired camera XZ
+    const floorAtCam = getGroundHeightAt ? getGroundHeightAt(desiredCamPos.x, desiredCamPos.z) : 0;
+    const minCamY = Math.min(floorAtCam, playerPos.y) + 0.65;
+    if (desiredCamPos.y < minCamY) {
+      desiredCamPos.y = minCamY;
+    }
+
+    this.currentCamPos.lerp(desiredCamPos, Math.min(1, delta * 14));
+    this.camera.position.copy(this.currentCamPos);
+
+    // 3. Screen shake
+    if (this.shakeIntensity > 0.001) {
+      const sx = (Math.random() - 0.5) * this.shakeIntensity * 0.4;
+      const sy = (Math.random() - 0.5) * this.shakeIntensity * 0.4;
+      const sz = (Math.random() - 0.5) * this.shakeIntensity * 0.4;
+      this.camera.position.add(new THREE.Vector3(sx, sy, sz));
+    }
+
+    this.camera.lookAt(this.currentLookTarget);
+  }
+}

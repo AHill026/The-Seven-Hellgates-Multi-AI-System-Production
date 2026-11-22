@@ -1,0 +1,199 @@
+import * as THREE from 'three';
+import {
+  AzraelHoodState,
+  LoadedAzraelAsset,
+} from './types';
+
+export class AzraelEffectsController {
+  private asset: LoadedAzraelAsset;
+  private chestHaloMesh: THREE.Mesh;
+  private chestHaloMat: THREE.MeshBasicMaterial;
+  private auraRingMesh: THREE.Mesh;
+  private auraRingMat: THREE.MeshBasicMaterial;
+  private auraParticles: THREE.Points;
+  private auraParticleMat: THREE.PointsMaterial;
+  private particlePhases: Float32Array;
+  private particleCount = 48;
+
+  private hoodState: AzraelHoodState = 'raised';
+  private hoodBlend = 1.0; // 1 = raised, 0 = lowered
+  private cloakMotionEnabled = true;
+
+  private currentEnergy = 0;
+
+  constructor(asset: LoadedAzraelAsset) {
+    this.asset = asset;
+
+    // 1. VFX_Chest Halo Mesh (Zero per-frame allocation)
+    this.chestHaloMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.chestHaloMesh = new THREE.Mesh(
+      new THREE.RingGeometry(0.055, 0.085, 24),
+      this.chestHaloMat
+    );
+    this.chestHaloMesh.name = 'Azrael_ChestRuneHalo';
+    this.chestHaloMesh.position.set(0, 0, 0.01);
+    const chestSocket = asset.sockets.VFX_Chest ?? asset.root;
+    chestSocket.add(this.chestHaloMesh);
+
+    // 2. VFX_Aura Ground Ring & Rising Spectral Particles
+    this.auraRingMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.auraRingMesh = new THREE.Mesh(
+      new THREE.RingGeometry(0.62, 0.76, 36),
+      this.auraRingMat
+    );
+    this.auraRingMesh.rotation.x = -Math.PI / 2;
+    this.auraRingMesh.position.set(0, -0.9, 0);
+
+    const auraSocket = asset.sockets.VFX_Aura ?? asset.root;
+    auraSocket.add(this.auraRingMesh);
+
+    // Rising particle buffer
+    const positions = new Float32Array(this.particleCount * 3);
+    this.particlePhases = new Float32Array(this.particleCount);
+    for (let i = 0; i < this.particleCount; i++) {
+      const angle = (i / this.particleCount) * Math.PI * 2;
+      const radius = 0.28 + (i % 5) * 0.11;
+      positions[i * 3] = Math.cos(angle) * radius;
+      positions[i * 3 + 1] = ((i * 0.37) % 1.9) - 0.85;
+      positions[i * 3 + 2] = Math.sin(angle) * radius;
+      this.particlePhases[i] = (i * 0.21) % 1.0;
+    }
+
+    const particleGeom = new THREE.BufferGeometry();
+    particleGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    this.auraParticleMat = new THREE.PointsMaterial({
+      color: 0x7dd3fc,
+      size: 0.045,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.auraParticles = new THREE.Points(particleGeom, this.auraParticleMat);
+    this.auraParticles.name = 'Azrael_AuraParticles';
+    auraSocket.add(this.auraParticles);
+  }
+
+  public setEnergyLevel(energy01: number, tintColor: THREE.Color): void {
+    this.currentEnergy = THREE.MathUtils.clamp(energy01, 0, 1);
+    this.chestHaloMat.color.copy(tintColor);
+    this.auraRingMat.color.copy(tintColor);
+    this.auraParticleMat.color.copy(tintColor).lerp(new THREE.Color(0xe0f2fe), 0.35);
+  }
+
+  public setHoodState(state: AzraelHoodState): void {
+    this.hoodState = state;
+  }
+
+  public getHoodState(): AzraelHoodState {
+    return this.hoodState;
+  }
+
+  public setCloakMotionEnabled(enabled: boolean): void {
+    this.cloakMotionEnabled = enabled;
+  }
+
+  public isCloakMotionEnabled(): boolean {
+    return this.cloakMotionEnabled;
+  }
+
+  public update(delta: number, elapsed: number): void {
+    // 1. Update VFX_Chest & VFX_Aura visibility & motion
+    const active = this.currentEnergy > 0.02;
+    this.chestHaloMesh.visible = active;
+    this.auraRingMesh.visible = active;
+    this.auraParticles.visible = active;
+
+    if (active) {
+      const pulse = 0.85 + Math.sin(elapsed * 4.2) * 0.15;
+      this.chestHaloMat.opacity = this.currentEnergy * 0.55 * pulse;
+      this.chestHaloMesh.rotation.z = elapsed * (0.9 + this.currentEnergy * 1.4);
+      const haloScale = 0.85 + this.currentEnergy * 0.45 * pulse;
+      this.chestHaloMesh.scale.setScalar(haloScale);
+
+      this.auraRingMat.opacity = Math.max(0, (this.currentEnergy - 0.18) * 0.48 * pulse);
+      this.auraRingMesh.scale.setScalar(0.92 + Math.sin(elapsed * 2.5) * 0.05);
+
+      this.auraParticleMat.opacity = this.currentEnergy * 0.72;
+      const posAttr = this.auraParticles.geometry.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < this.particleCount; i++) {
+        this.particlePhases[i] = (this.particlePhases[i] + delta * (0.35 + this.currentEnergy * 0.45)) % 1.0;
+        const p = this.particlePhases[i];
+        const angle = (i / this.particleCount) * Math.PI * 2 + elapsed * 0.5;
+        const radius = 0.28 + (i % 5) * 0.11 + Math.sin(p * Math.PI) * 0.08;
+        posAttr.setXYZ(
+          i,
+          Math.cos(angle) * radius,
+          -0.95 + p * 2.05,
+          Math.sin(angle) * radius
+        );
+      }
+      posAttr.needsUpdate = true;
+    }
+
+    // 2. Smooth Hood Raise / Lower
+    const targetHood = this.hoodState === 'raised' ? 1 : 0;
+    this.hoodBlend = THREE.MathUtils.lerp(
+      this.hoodBlend,
+      targetHood,
+      Math.min(1, delta * 8)
+    );
+    const { crown, back, sideL, sideR } = this.asset.hoodBones;
+    if (crown) {
+      // Lowering folds the hood crown cleanly back toward the upper spine
+      crown.rotation.x = THREE.MathUtils.lerp(-0.92, 0.0, this.hoodBlend);
+      crown.position.y = THREE.MathUtils.lerp(0.28, 0.40, this.hoodBlend);
+      crown.position.z = THREE.MathUtils.lerp(-0.15, -0.03, this.hoodBlend);
+    }
+    if (back) {
+      back.rotation.x = THREE.MathUtils.lerp(0.35, 0.0, this.hoodBlend);
+    }
+    if (sideL) {
+      sideL.scale.setScalar(THREE.MathUtils.lerp(0.55, 1.0, this.hoodBlend));
+    }
+    if (sideR) {
+      sideR.scale.setScalar(THREE.MathUtils.lerp(0.55, 1.0, this.hoodBlend));
+    }
+
+    // 3. Bounded Cloak Secondary Motion (additive subtle flutter post-animation)
+    if (this.cloakMotionEnabled && this.asset.cloakBones.length > 0) {
+      const energyGust = 1.0 + this.currentEnergy * 1.4;
+      this.asset.cloakBones.forEach((bone, idx) => {
+        const wave = Math.sin(elapsed * 2.2 - idx * 0.85) * 0.045 * energyGust;
+        const sway = Math.cos(elapsed * 1.6 - idx * 0.7) * 0.028 * energyGust;
+        bone.rotation.x += wave + this.currentEnergy * 0.06;
+        bone.rotation.z += sway;
+      });
+    }
+  }
+
+  private disposed = false;
+
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.chestHaloMesh.parent?.remove(this.chestHaloMesh);
+    this.chestHaloMesh.geometry.dispose();
+    this.chestHaloMat.dispose();
+    this.auraRingMesh.parent?.remove(this.auraRingMesh);
+    this.auraRingMesh.geometry.dispose();
+    this.auraRingMat.dispose();
+    this.auraParticles.parent?.remove(this.auraParticles);
+    this.auraParticles.geometry.dispose();
+    this.auraParticleMat.dispose();
+  }
+}
